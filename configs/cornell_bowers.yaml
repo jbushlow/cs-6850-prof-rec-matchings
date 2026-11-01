@@ -1,0 +1,41 @@
+settings:
+  output_dir: output/bowers
+  cache_dir: .cache/http
+
+  contact_email: ""
+  author_batch_size: 20
+
+  max_faculty: null
+  max_papers_per_author: null
+
+  abstract_min_words: 10
+  abstract_fallbacks: false
+  abstract_max_attempts: 3
+  abstract_request_timeout: 20
+  max_landing_pages: 2
+  max_clique_authors: 100
+  graphml: false
+
+institutions:
+  - name: Cornell University
+    openalex_id: I205783295
+
+    # Cornell schools can publish different official profile URLs for one person.
+    # Cross-host aliases merge; two different profiles on the same host do not.
+    allow_cross_host_profile_aliases: true
+
+    # Cornell Tech is a distinct child institution
+    affiliation_ids:
+      - I4405261073
+
+    faculty_sources:
+      # Bowers CIS departmental faculty
+      - type: html
+        label: "Bowers CIS"
+        url: "https://bowers.cornell.edu/directory/index?department=All&roles%5B147%5D=147&location=All"
+        card_selector: ".views-row .directory-card"
+        name_selector: ".name a"
+        profile_link_selector: ".name a"
+        department_selector: ".field--name-field-college-department"
+        max_pages: 1
+        default_department: "Cornell Bowers CIS"

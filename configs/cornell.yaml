@@ -1,0 +1,93 @@
+settings:
+  output_dir: output
+  cache_dir: .cache/http
+
+  # Leave blank to use RESEARCH_CONTACT_EMAIL from the environment.
+  contact_email: ""
+
+  # OpenAlex can accept up to 100 IDs in an OR filter.
+  # Twenty is a conservative starting point.
+  author_batch_size: 20
+
+  # Development limits. Use null only after validating the first run.
+  max_faculty: null
+  max_papers_per_author: 25
+
+  abstract_min_words: 10
+  abstract_fallbacks: true
+  abstract_max_attempts: 3
+  abstract_request_timeout: 20
+  max_landing_pages: 2
+  max_clique_authors: 100
+
+  # Keep false initially; GraphML can consume much more memory.
+  graphml: false
+
+institutions:
+  - name: Cornell University
+    openalex_id: I205783295
+
+    # Cornell schools can publish different official profile URLs for one person.
+    # Cross-host aliases merge; two different profiles on the same host do not.
+    allow_cross_host_profile_aliases: true
+
+    # CALS and Cornell Tech are distinct child institution records.
+    affiliation_ids:
+      - I4210092791
+      - I4405261073
+
+    faculty_sources:
+      # Bowers CIS departmental faculty
+      - type: html
+        label: "Bowers CIS"
+        url: "https://bowers.cornell.edu/directory/index?department=All&roles%5B147%5D=147&location=All"
+        card_selector: ".views-row .directory-card"
+        name_selector: ".name a"
+        profile_link_selector: ".name a"
+        department_selector: ".field--name-field-college-department"
+        max_pages: 1
+        default_department: "Cornell Bowers CIS"
+
+      # CALS faculty
+      - type: html
+        label: "CALS"
+        url: "https://cals.cornell.edu/research/find-an-expert/all?field_expert_type_target_id=224"
+        card_selector: ".expert-card"
+        name_selector: ".expert-card-front a.link"
+        profile_link_selector: ".expert-card-front a.link"
+        department_selector: ".expert-card-front .title"
+        next_page_selector: ".pager__item--next a"
+        max_pages: 50
+        default_department: "CALS"
+
+      # Client-rendered directory. The adapter is generic; all site-specific
+      # behavior is expressed through selectors and pagination configuration.
+      - type: rendered_html
+        label: "Cornell Engineering"
+        url: "https://www.duffield.cornell.edu/people/?live_people_search%5BrefinementList%5D%5Brole%5D%5B0%5D=Faculty"
+        card_selector: ".person-hit"
+        wait_selector: ".person-hit"
+        name_selector: ".person-hit__name a"
+        profile_link_selector: ".person-hit__name a"
+        department_selector: ".person-hit__departments-text"
+        next_page_selector: '.ais-Pagination-link[aria-label="Next Page"]'
+        max_pages: 50
+        page_delay_ms: 500
+        default_department: "Cornell Engineering"
+
+      # Discover standardized department pages from the public A&S index.
+      # Filtering to Academic Department pages avoids centers/programs whose
+      # affiliate lists can include people outside the college's core roster.
+      - type: indexed_html
+        label: "Cornell Arts & Sciences departments"
+        index_url: "https://as.cornell.edu/departments-and-programs"
+        detail_link_selector: 'h2 a.title-link[href*="/department_program/"]'
+        required_text_selector: "main.department-program .type"
+        required_text: "Academic Department"
+        card_selector: "main.department-program .content h3 + ul.columns > li"
+        name_selector: "a"
+        profile_link_selector: "a"
+        department_page_selector: "main.department-program h1.title"
+        max_detail_pages: 100
+        allow_empty_detail_pages: true
+        default_department: "Cornell Arts & Sciences"

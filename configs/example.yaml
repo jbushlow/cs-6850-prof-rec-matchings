@@ -1,0 +1,38 @@
+# Replace the example faculty source with the actual publicly accessible listing.
+# For JavaScript-rendered pages use rendered_html; for an index of homogeneous
+# department pages use indexed_html. Selectors remain configuration, not code.
+settings:
+  output_dir: output
+  cache_dir: .cache/http
+  contact_email: ""  # or set RESEARCH_CONTACT_EMAIL
+  author_batch_size: 20 # OR author-ID filter; reduces duplicated paper fetches
+  max_faculty: null     # testing: set to 10
+  max_papers_per_author: null # testing: set to 100
+  abstract_min_words: 25
+  max_landing_pages: 4
+  max_clique_authors: 100
+  graphml: false
+institutions:
+  - name: Example University
+    openalex_id: I123456789 # Replace with actual OpenAlex ID
+    # affiliation_ids: [I...] # Optional child campuses/medical school institution IDs
+    faculty_sources:
+      - type: html
+        url: "https://www.example.edu/faculty"
+        card_selector: ".faculty-card"
+        name_selector: ".faculty-card__name"
+        profile_link_selector: "a.faculty-card__link"
+        department_selector: ".faculty-card__department" # optional
+        next_page_selector: "a.next" # optional
+        max_pages: 20
+        default_department: "" # optional
+        # Exclude *only* if public directory already explicitly separates students/faculty.
+        # On an unfiltered directory, set a card-level faculty_selector or use faculty-only URL.
+        faculty_selector: ""  # optional: CSS selector inside each card that signals faculty
+# Alternative to HTML:
+#      - type: csv
+#        path: data/university_faculty.csv
+#        name_column: name
+#        department_column: department
+#        profile_url_column: profile_url
+#        orcid_column: orcid

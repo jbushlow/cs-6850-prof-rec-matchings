@@ -1,0 +1,10 @@
+# Offline test of stage 1 only: facultygraph faculty --config configs/local-demo.yaml
+settings:
+  output_dir: output
+  cache_dir: .cache/http
+institutions:
+  - name: Sample University (fictional records)
+    openalex_id: I123456789
+    faculty_sources:
+      - type: csv
+        path: ../examples/local_faculty.csv
