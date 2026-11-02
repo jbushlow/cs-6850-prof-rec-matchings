@@ -57,6 +57,11 @@ MISSING_ABSTRACT = "title"
 QWEN_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 QWEN_GENERATIVE_MODEL = "Qwen/Qwen3-4B"  # Separate instruct/generative model
 MAX_ADDITIONAL = 3
+# Choose which objective drives BOTH team search and recommendation ranking:
+#   "science"   = scientific requirement coverage F(T)
+#   "brokerage" = normalized network brokerage B(T)
+#   "combined"  = F(T) + LAMBDA_NETWORK * B(T) (original behavior)
+OBJECTIVE_MODE = "combined"
 LAMBDA_NETWORK = 0.25
 # Component 2 uses the previously computed NCUT paper clusters directly.
 # The number of clusters is read from the saved NCUT manifest; there are no
@@ -69,14 +74,22 @@ EMBEDDING_CACHE_DIR = (BASE_DIR / "embedding_cache" /
 # Required: existing offline NCUT output, strictly checked against paper IDs,
 # text hashes and model. Run cluster_ncut_abstracts.py once beforehand.
 PRECOMPUTED_TOPIC_CLUSTERS_DIR = EMBEDDING_CACHE_DIR / "topic_clusters_ncut_v1"
-THRESHOLD_LOW = None        # None for automatic Qwen3 cosine calibration
-THRESHOLD_HIGH = None       # Must set BOTH bounds to override calibration
-EVIDENCE_LABEL_THRESHOLD = None  # None means the default 0.65
+# Default scoring uses a smooth monotonic RBF transform of the ORIGINAL cosine.
+# No percentile clipping: distinct similarities such as 0.55 and 0.85 stay distinct.
+SIMILARITY_TRANSFORM = "rbf"        # "rbf", "positive_cosine", or "percentile" (legacy)
+RBF_BETA = 2.0                     # exp(-beta * (1 - raw_combined_cosine))
+EVIDENCE_LABEL_RAW_COSINE = 0.60   # Starting point; empirical tuning recommended
+EVIDENCE_LABEL_THRESHOLD = None    # None derives the label cutoff from raw cosine
+THRESHOLD_LOW = None               # Only used for legacy "percentile" mode
+THRESHOLD_HIGH = None              # Only used for legacy "percentile" mode
 RESTARTS = 30
 TOP_R = 4
 MAX_ROUNDS = 12
 SCIENCE_TOLERANCE = 0.03
-N_TEAMS = 5
+# Export every distinct team visited by greedy or randomized search. Rank 1 is
+# the default selection; the remaining rows are ordered by the active objective.
+# Set this to an integer only when a smaller presentation export is desired.
+N_TEAMS = None
 EXACT_CHECK_MAX_CANDIDATES = 0
 SEED = 42
 
@@ -330,20 +343,35 @@ def read_retrieval_embedding_cache(cache_root, model_name, paper_ids, full_texts
 
 def score_papers(data, requirements, encoder, low=None, high=None,
                   evidence_label_threshold=None, project_abstract=None,
-                  cache_root=None, return_retrieval_vectors=False):
-    """Qwen3 retrieval: z=.5 cosine(query, full paper) + .5 best passage cosine.
+                  cache_root=None, return_retrieval_vectors=False,
+                  similarity_transform="rbf", rbf_beta=2.0,
+                  label_raw_cosine_cutoff=0.60):
+    """Qwen3 retrieval with signed raw cosine and a configurable score mapping.
 
-    By default, scores are RELATIVE to the query's paper index: calibrated
-    with the 10th/90th percentiles of all requirement-paper z values.
-    Unlike the original TF-IDF values, fixed .02/.45 bounds are NOT reused.
-    low/high can explicitly override automatic percentile calibration.
+    z = 0.5*cos(query, full document) + 0.5*best passage cosine.
+    Default score = exp(-beta*(1-z)) in (0,1], avoiding percentile saturation.
+    Keep original z in output as raw_combined_cosine for interpretability.
     """
-    if (low is None) != (high is None):
-        raise ValueError("Set both THRESHOLD_LOW and THRESHOLD_HIGH, or neither")
-    if low is not None and not (math.isfinite(low) and math.isfinite(high) and -1 <= low < high <= 1):
-        raise ValueError("Require -1 <= low < high <= 1 for cosine calibration")
+    if similarity_transform not in ("rbf", "positive_cosine", "percentile"):
+        raise ValueError("similarity_transform must be rbf, positive_cosine, or percentile")
+    if not math.isfinite(rbf_beta) or not 0 < rbf_beta <= 20:
+        raise ValueError("RBF_BETA must be finite and in (0,20]")
+    if not math.isfinite(label_raw_cosine_cutoff) or not -1 <= label_raw_cosine_cutoff <= 1:
+        raise ValueError("EVIDENCE_LABEL_RAW_COSINE must be within [-1,1]")
+    if similarity_transform != "percentile" and (low is not None or high is not None):
+        raise ValueError("THRESHOLD_LOW/HIGH apply only to the legacy percentile mode")
+    if similarity_transform == "percentile":
+        if (low is None) != (high is None):
+            raise ValueError("Set both THRESHOLD_LOW and THRESHOLD_HIGH, or neither")
+        if low is not None and not (math.isfinite(low) and math.isfinite(high) and -1 <= low < high <= 1):
+            raise ValueError("Require -1 <= low < high <= 1 for cosine calibration")
     if evidence_label_threshold is None:
-        evidence_label_threshold = 0.65  # minimum *calibrated* evidence strength
+        if similarity_transform == "rbf":
+            evidence_label_threshold = math.exp(-rbf_beta * (1-label_raw_cosine_cutoff))
+        elif similarity_transform == "positive_cosine":
+            evidence_label_threshold = max(label_raw_cosine_cutoff, 0.0)
+        else:
+            evidence_label_threshold = 0.65  # legacy label cutoff
     if not 0 <= evidence_label_threshold <= 1:
         raise ValueError("evidence label threshold must be within [0,1]")
     papers = {}
@@ -400,28 +428,43 @@ def score_papers(data, requirements, encoder, low=None, high=None,
             best_indices[j, k] = best_loc
             best_sentence_sim[j, k] = sent_sim[j, best_loc]
     raw_sim = 0.5 * (full_sim + best_sentence_sim)
-    if low is None:
-        calibration_low, calibration_high = (float(v) for v in np.percentile(raw_sim, [10, 90]))
-        method = "within_query_p10_p90"
+    calibration_low = calibration_high = None
+    if similarity_transform == "rbf":
+        # Preserves strict order of ALL cosine scores, even when negative.
+        # 0.55 -> ~0.407, 0.85 -> ~0.741 when beta=2.
+        calibrated = np.exp(-rbf_beta * (1.0 - raw_sim))
+        method = "rbf_on_combined_cosine"
+    elif similarity_transform == "positive_cosine":
+        # Useful no-hyperparameter comparison; negatives become zero evidence.
+        calibrated = np.maximum(raw_sim, 0.0)
+        method = "positive_part_raw_cosine"
     else:
-        calibration_low, calibration_high = float(low), float(high)
-        method = "fixed_user_supplied"
-    if calibration_high-calibration_low < 1e-8:
-        # Identical raw scores carry zero within-query discriminatory evidence.
-        calibrated = np.full_like(raw_sim, 0.5)
-        method += "_degenerate_equal_scores"
-    else:
-        calibrated = np.clip((raw_sim-calibration_low)/(calibration_high-calibration_low), 0, 1)
+        if low is None:
+            calibration_low, calibration_high = (float(v) for v in np.percentile(raw_sim, [10, 90]))
+            method = "within_query_p10_p90"
+        else:
+            calibration_low, calibration_high = float(low), float(high)
+            method = "fixed_user_supplied"
+        if calibration_high-calibration_low < 1e-8:
+            calibrated = np.full_like(raw_sim, 0.5)
+            method += "_degenerate_equal_scores"
+        else:
+            calibrated = np.clip((raw_sim-calibration_low)/(calibration_high-calibration_low), 0, 1)
     project_high = float(np.percentile(project_doc_sim, 75))
     project_low = float(np.percentile(project_doc_sim, 50))
     strong_sentence = np.percentile(best_sentence_sim, 75, axis=1)
     calibration = {"method": method, "low": calibration_low, "high": calibration_high,
-                   "percentiles": [10, 90] if low is None else None,
+                   "percentiles": ([10, 90] if low is None else None)
+                   if similarity_transform == "percentile" else None,
+                   "rbf_beta": rbf_beta if similarity_transform == "rbf" else None,
+                   "raw_cosine_label_cutoff": label_raw_cosine_cutoff
+                   if similarity_transform != "percentile" else None,
+                   "raw_combined_cosine_p10_p50_p90": [float(x) for x in np.percentile(raw_sim, [10, 50, 90])],
                    "label_score_threshold": evidence_label_threshold,
                    "label_project_high_p75": project_high,
                    "label_project_low_p50": project_low,
                    "label_sentence_high_p75_per_requirement": [float(v) for v in strong_sentence],
-                   "warning": "Query-relative scores and quantile labels are retrieval heuristics, not calibrated probabilities of expertise."}
+                   "warning": "Similarity scores and quantile labels are retrieval heuristics, not calibrated probabilities of expertise."}
     scores = {p["id"]: np.zeros(nr, dtype=np.float64) for p in data["professors"]}
     selected_evidence = {p["id"]: [None] * nr for p in data["professors"]}
     paper_evidence = []
@@ -610,6 +653,10 @@ def build_topic_brokerage(data, graph, requirements, scores, initiator, retrieva
             for j, req in enumerate(requirements):
                 if j == home_requirement:
                     continue
+                # Explicit presence check prevents treating missing paper evidence
+                # as a zero-valued paper score when experimenting with signed cosine.
+                if j not in outside_papers[s]:
+                    continue
                 improvement = max(0.0, float(outside_scores[s][j] - own_scores[j]))
                 relevance = float(own_scores[home_requirement] * weights[j] * improvement)
                 if relevance <= EPS:
@@ -690,7 +737,7 @@ def build_topic_brokerage(data, graph, requirements, scores, initiator, retrieva
 
 
 class Objective:
-    """Joint scientific and new requirement-relevant structural-hole objective.
+    """Mode-selectable scientific / structural-hole objective.
 
     The team contains the initiator plus selected additional professors.
     Each proposed initiator--broker edge is evaluated on the FULL team graph:
@@ -699,13 +746,16 @@ class Objective:
     """
 
     def __init__(self, initiator, graph, scores, weights, *, max_additional=3,
-                 lambda_network=0.25, topic_brokerage=None):
+                 lambda_network=0.25, topic_brokerage=None, objective_mode="combined"):
         if initiator not in graph:
             raise ValueError("Unknown initiator")
         if max_additional < 0 or not math.isfinite(lambda_network) or lambda_network < 0:
             raise ValueError("max_additional and lambda_network must be nonnegative")
         if topic_brokerage is None:
             raise ValueError("NCUT structural-hole brokerage data must be computed first")
+        if objective_mode not in ("science", "brokerage", "combined"):
+            raise ValueError("objective_mode must be 'science', 'brokerage', or 'combined'")
+        self.objective_mode = objective_mode
         self.u, self.g, self.scores = initiator, graph, scores
         self.w = np.asarray(weights, dtype=np.float64)
         if len(self.w) == 0 or abs(float(self.w.sum()) - 1) > 1e-6:
@@ -770,8 +820,18 @@ class Objective:
         return float(np.clip(raw / self.network_normalizer, 0.0, 1.0))
 
     @lru_cache(maxsize=100000)
-    def value(self, additional: frozenset):
+    def combined(self, additional: frozenset):
+        """Always report the original combined score, independent of mode."""
         return self.science(additional) + self.lambda_network * self.network(additional)
+
+    @lru_cache(maxsize=100000)
+    def value(self, additional: frozenset):
+        """Active search objective; greedy, revisions, and ranking all use this."""
+        if self.objective_mode == "science":
+            return self.science(additional)
+        if self.objective_mode == "brokerage":
+            return self.network(additional)
+        return self.combined(additional)
 
     def components(self, additional):
         additional = frozenset(additional)
@@ -779,7 +839,8 @@ class Objective:
             raise ValueError("Invalid proposed team")
         return {"scientific": self.science(additional),
                 "brokerage": self.network(additional),
-                "combined": self.value(additional)}
+                "combined": self.combined(additional),
+                "objective": self.value(additional)}
 
     def marginal(self, candidate, additional):
         team = frozenset(additional)
@@ -828,8 +889,10 @@ def _event(obj, run, round_index, phase, action, before, after, **details):
            "additional_before": sorted(before), "additional_after": sorted(after),
            "scientific_after": round(obj.science(after), 7),
            "brokerage_after": round(obj.network(after), 7),
-           "combined_after": round(obj.value(after), 7),
-           "combined_gain": round(obj.value(after)-obj.value(before), 7)}
+           "combined_after": round(obj.combined(after), 7),
+           "combined_gain": round(obj.combined(after)-obj.combined(before), 7),
+           "objective_after": round(obj.value(after), 7),
+           "objective_gain": round(obj.value(after)-obj.value(before), 7)}
     evt.update(details)
     run["events"].append(evt)
     run["visited"].add(after)
@@ -920,7 +983,7 @@ def nondominated(teams, obj):
     return frontier
 
 
-def team_record(team, obj, profs, requirements, selected_evidence):
+def team_record(team, obj, profs, requirements, selected_evidence, evidence_min_score=0.0):
     team = frozenset(team)
     full = [obj.u] + sorted(team)
     comps = obj.components(team)
@@ -939,7 +1002,7 @@ def team_record(team, obj, profs, requirements, selected_evidence):
         without = team-{p}
         evidence = []
         for j, req in enumerate(requirements):
-            if obj.scores[p][j] > 0:
+            if obj.scores[p][j] + EPS >= evidence_min_score:
                 evidence.append({"requirement_id": req["id"],
                                  "professor_requirement_score": round(float(obj.scores[p][j]), 7),
                                  "best_paper": selected_evidence[p][j]})
@@ -947,12 +1010,15 @@ def team_record(team, obj, profs, requirements, selected_evidence):
                               "departments": profs[p].get("departments", ""),
                               "scientific_leave_one_out": round(obj.science(team)-obj.science(without), 7),
                               "brokerage_leave_one_out": round(obj.network(team)-obj.network(without), 7),
-                              "combined_leave_one_out": round(obj.value(team)-obj.value(without), 7),
+                              "combined_leave_one_out": round(obj.combined(team)-obj.combined(without), 7),
+                              "objective_leave_one_out": round(obj.value(team)-obj.value(without), 7),
                               "supporting_papers_by_requirement": evidence,
                               "brokerage_path_evidence": obj.brokerage_explanation(p, team)})
     return {"professor_ids": full, "additional_professor_ids": sorted(team),
-            "professor_names": [profs[p]["name"] for p in full],
-            "professor_departments": [profs[p].get("departments", "") for p in full],
+            # Python tuples become two-element arrays in JSON. Keeping each
+            # name beside its department makes recommendation inspection easy.
+            "professor_name_department_pairs": [
+                (profs[p]["name"], profs[p].get("departments", "")) for p in full],
             "hypothetical_collaboration_links": [
                 {"source": obj.u, "source_name": profs[obj.u]["name"],
                  "source_departments": profs[obj.u].get("departments", ""),
@@ -966,6 +1032,8 @@ def team_record(team, obj, profs, requirements, selected_evidence):
             "additional_count": len(team), "scientific_score": round(comps["scientific"], 7),
             "brokerage_score": round(comps["brokerage"], 7),
             "combined_score": round(comps["combined"], 7),
+            "objective_score": round(comps["objective"], 7),
+            "objective_mode": obj.objective_mode,
             "per_requirement": need_details, "contributions": contributions}
 
 
@@ -1005,19 +1073,25 @@ def recommend(data, query, *, encoder=None, max_additional=3, lambda_network=0.2
               evidence_label_threshold=None, restarts=30, top_r=4,
               max_rounds=12, min_gain=1e-9, science_tolerance=0.03,
               n_teams=5, seed=42, exact_check_max_candidates=0,
+              objective_mode="combined", similarity_transform="rbf",
+              rbf_beta=2.0, label_raw_cosine_cutoff=0.60,
               embedding_cache_dir=None, topic_cluster_dir=None):
     ids = validate_dataset(data)
     reqs = resolve_requirements(query, ids)
     if encoder is None:
         encoder = TextEncoder()
-    if restarts < 0 or top_r < 1 or max_rounds < 0 or n_teams < 1:
+    if restarts < 0 or top_r < 1 or max_rounds < 0 or (n_teams is not None and n_teams < 1):
         raise ValueError("Invalid search parameters")
+    if objective_mode not in ("science", "brokerage", "combined"):
+        raise ValueError("objective_mode must be 'science', 'brokerage', or 'combined'")
     if min_gain < 0 or science_tolerance < 0 or exact_check_max_candidates < 0:
         raise ValueError("Gains, tolerance and exact cap must be nonnegative")
     scores, evidence, paper_rows, calibration, retrieval = score_papers(
         data, reqs, encoder, threshold_low, threshold_high,
         evidence_label_threshold, project_abstract=query.get("abstract"),
-        cache_root=embedding_cache_dir, return_retrieval_vectors=True)
+        cache_root=embedding_cache_dir, return_retrieval_vectors=True,
+        similarity_transform=similarity_transform, rbf_beta=rbf_beta,
+        label_raw_cosine_cutoff=label_raw_cosine_cutoff)
     graph = make_collaboration_graph(data)
     u = query["initiator_id"]
     profs = {p["id"]: p for p in data["professors"]}
@@ -1025,8 +1099,13 @@ def recommend(data, query, *, encoder=None, max_additional=3, lambda_network=0.2
     topics = build_topic_brokerage(data, graph, reqs, scores, u, retrieval,
                                    paper_rows, precomputed_dir=topic_cluster_dir)
     obj = Objective(u, graph, scores, weights, max_additional=max_additional,
-                    lambda_network=lambda_network, topic_brokerage=topics)
+                    lambda_network=lambda_network, topic_brokerage=topics,
+                    objective_mode=objective_mode)
     candidates = sorted(set(profs)-{u})
+    singleton_brokerage_values = [obj.network(frozenset({b}))
+                                 for b in topics["witnesses_by_broker"]]
+    maximum_singleton_brokerage = max(singleton_brokerage_values, default=0.0)
+    positive_singleton_brokers = sum(v > EPS for v in singleton_brokerage_values)
     runs = [sequential_search(candidates, obj, seed=seed, top_r=top_r,
                               max_rounds=max_rounds, min_gain=min_gain, randomized=False)]
     for k in range(restarts):
@@ -1036,6 +1115,8 @@ def recommend(data, query, *, encoder=None, max_additional=3, lambda_network=0.2
                                       max_rounds=max_rounds, min_gain=min_gain,
                                       randomized=True, forced_first=forced))
     discovered = {team for run in runs for team in run["visited"]}
+    greedy_visited = runs[0]["visited"]
+    randomized_visited = set().union(*(run["visited"] for run in runs[1:])) if len(runs) > 1 else set()
     final_teams = {frozenset(run["final_additional"]) for run in runs}
     exact = None
     if exact_check_max_candidates and len(candidates) <= exact_check_max_candidates:
@@ -1046,29 +1127,47 @@ def recommend(data, query, *, encoder=None, max_additional=3, lambda_network=0.2
                  "best_objective": round(max(obj.value(s) for s in all_teams), 7)}
     frontier = nondominated(discovered, obj)
     max_science = max(obj.science(t) for t in discovered)
-    eligible_default = [t for t in discovered if obj.science(t) >= max_science-science_tolerance-EPS]
-    order = lambda t: (-obj.value(t), -obj.science(t), -obj.network(t), len(t), tuple(sorted(t)))
+    # Preserve the original science-tolerance default ONLY for combined mode.
+    # Brokerage-only must not be filtered by an unrelated scientific constraint.
+    eligible_default = ([t for t in discovered
+                         if obj.science(t) >= max_science-science_tolerance-EPS]
+                        if objective_mode == "combined" else list(discovered))
+    if objective_mode == "combined":
+        order = lambda t: (-obj.value(t), -obj.science(t), -obj.network(t),
+                           len(t), tuple(sorted(t)))
+    else:
+        # Do not use the disabled component as a tie-breaker.
+        order = lambda t: (-obj.value(t), len(t), tuple(sorted(t)))
     champion = min(eligible_default, key=order)
-    # Output alternatives ranked by objective. We do not force every reported team
-    # to be Pareto optimal, since users explicitly want multiple combinations.
+    # Include intermediate visited states (including forced-first teams) as
+    # alternatives; neither 31 runs nor 31 final optima is implied.
     alternatives = sorted(discovered-{champion}, key=order)
-    picks = [champion] + alternatives[:n_teams-1]
+    picks = [champion] + (alternatives if n_teams is None else alternatives[:n_teams-1])
     teams = []
     for idx, team in enumerate(picks, 1):
-        record = team_record(team, obj, profs, reqs, evidence)
+        record = team_record(team, obj, profs, reqs, evidence,
+                             evidence_min_score=calibration["label_score_threshold"])
         record.update({"rank": idx, "is_default": idx == 1,
                        "pareto_nondominated_in_discovered_pool": team in frontier,
                        "seen_as_final_run_team": team in final_teams,
+                       "visited_by_greedy": team in greedy_visited,
+                       "visited_by_randomized_search": team in randomized_visited,
                        "within_science_tolerance": obj.science(team) >= max_science-science_tolerance-EPS})
         teams.append(record)
-    hgraph = build_heterogeneous_graph(data)
-    graph_out = {"nodes": [{"id": node_id, **attrs} for node_id, attrs in hgraph.nodes(data=True)],
-                 "edges": [{"source": a, "target": b, **attrs} for a, b, attrs in hgraph.edges(data=True)]}
     # Sets are used internally to deduplicate path states; do not serialize them.
     for run in runs:
         run["visited_unique_team_count"] = len(run["visited"])
         del run["visited"]
-    query_graph = make_query_evidence_graph(graph_out, reqs, paper_rows)
+    returned_origin_counts = {
+        "greedy_only": sum(t["visited_by_greedy"] and
+                           not t["visited_by_randomized_search"] for t in teams),
+        "randomized_only": sum(t["visited_by_randomized_search"] and
+                               not t["visited_by_greedy"] for t in teams),
+        "both": sum(t["visited_by_greedy"] and
+                    t["visited_by_randomized_search"] for t in teams),
+        "neither": sum(not t["visited_by_greedy"] and
+                       not t["visited_by_randomized_search"] for t in teams),
+    }
     result = {"project_title": query.get("title", ""), "initiator_id": u,
               "initiator_name": profs[u]["name"],
               "initiator_departments": profs[u].get("departments", ""),
@@ -1077,8 +1176,14 @@ def recommend(data, query, *, encoder=None, max_additional=3, lambda_network=0.2
               "max_additional_professors": max_additional,
               "max_team_size_including_initiator": max_additional+1,
               "lambda_network": lambda_network,
+              "objective_mode": objective_mode,
+              "objective_definition": {
+                  "science": "F(T)", "brokerage": "B(T)",
+                  "combined": "F(T) + lambda_network * B(T)"}[objective_mode],
               "science_tolerance": science_tolerance,
               "raw_similarity_calibration": calibration,
+              "maximum_singleton_brokerage": round(maximum_singleton_brokerage, 9),
+              "positive_singleton_broker_count": positive_singleton_brokers,
               "relationship_label_threshold": calibration["label_score_threshold"],
               "input_data_summary": data.get("source_summary"),
               "requirement_count": len(reqs),
@@ -1096,6 +1201,10 @@ def recommend(data, query, *, encoder=None, max_additional=3, lambda_network=0.2
                   "structural-hole payoff, not the original network game."),
               "source_and_destination_topics": topics["topics"],
               "discovered_unique_team_count": len(discovered),
+              "greedy_visited_unique_team_count": len(greedy_visited),
+              "randomized_visited_unique_team_count": len(randomized_visited),
+              "returned_team_search_origin_counts": returned_origin_counts,
+              "number_of_search_runs": len(runs),
               "pareto_frontier_count": len(frontier), "recommended_teams": teams,
               "selected_default_team": teams[0],
               "exact_check": exact,
@@ -1106,9 +1215,10 @@ def recommend(data, query, *, encoder=None, max_additional=3, lambda_network=0.2
                   "Only observed broker-scientist edges support proposed intermediary paths; no future introductions are guaranteed.",
                   "Brokerage extends Kleinberg-style harmonic open-wedge payoff with requirement relevance; it is not the paper's exact network game.",
                   "All proposed u-to-candidate edges are hypothetical; the observed graph is unchanged.",
-                  "The default choice is best combined score within science_tolerance of highest discovered scientific score.",
+                  ("Combined mode selects a default team by combined score within science_tolerance "
+                   "of the best discovered scientific score; single-component modes have no such filter."),
                   "Requirements were decomposed by generative Qwen3 from the proposal abstract; Qwen3-Embedding scores paper evidence.",
-                  "Scores are relative to the candidate papers for this project unless fixed calibration cutoffs were supplied.",
+                  "Scores use a configured monotonic transform of paper cosine, not a calibrated probability of expertise.",
                   "Title-only papers use the title as the evidence passage; title-based evidence is less detailed than abstract-based evidence."
               ]}
     professor_directory = [
@@ -1116,9 +1226,8 @@ def recommend(data, query, *, encoder=None, max_additional=3, lambda_network=0.2
          "departments": profs[p].get("departments", "")}
         for p in sorted(profs)
     ]
-    return {"result": result, "requirements": reqs, "graph": graph_out,
+    return {"result": result,
             "professor_directory": professor_directory,
-            "query_graph": query_graph,
             "topic_papers": [{"paper_id": pid, "cluster_id": int(topics["paper_cluster"][pid])}
                              for pid in retrieval["paper_ids"]],
             "paper_evidence": paper_rows, "professor_requirement_scores":
@@ -1127,27 +1236,28 @@ def recommend(data, query, *, encoder=None, max_additional=3, lambda_network=0.2
                   "professor_departments": profs[p].get("departments", ""),
                   "score": round(float(scores[p][j]), 7), "best_paper": evidence[p][j]}
                  for p in sorted(profs) for j in range(len(reqs))],
-            "trace": {"greedy": runs[0], "randomized_runs": runs[1:]}}
+            "trace": {"objective_mode": objective_mode,
+                      "greedy": runs[0], "randomized_runs": runs[1:]}}
 
 
 def export_results(folder, artifacts):
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
+    # These were duplicate representations or large derived graphs. Remove
+    # stale copies so a rerun leaves the output directory in its new compact
+    # form. Their useful information remains in the retained files below.
+    for filename in ("requirements.json", "graph.json", "professor_directory.json",
+                     "professor_directory.csv", "query_evidence_graph.json",
+                     "paper_evidence.json", "rounds.csv"):
+        path = folder / filename
+        if path.exists():
+            path.unlink()
     for key, filename in [("result", "recommendations.json"),
-                          ("requirements", "requirements.json"), ("graph", "graph.json"),
-                          ("professor_directory", "professor_directory.json"),
-                          ("query_graph", "query_evidence_graph.json"),
                           ("topic_papers", "paper_topic_assignments.json"),
-                          ("paper_evidence", "paper_evidence.json"),
                           ("professor_requirement_scores", "professor_scores.json"),
                           ("trace", "trace.json")]:
         save_json(folder/filename, artifacts[key])
     directory = {row["professor_id"]: row for row in artifacts["professor_directory"]}
-    with (folder/"professor_directory.csv").open("w", newline="", encoding="utf-8") as f:
-        cols = ["professor_id", "name", "departments"]
-        writer = csv.DictWriter(f, fieldnames=cols)
-        writer.writeheader()
-        writer.writerows(artifacts["professor_directory"])
     with (folder/"paper_evidence.csv").open("w", newline="", encoding="utf-8") as f:
         cols = ["requirement_id", "paper_id", "title", "author_ids", "text_source", "score",
                 "raw_combined_cosine", "document_cosine", "sentence_cosine", "project_document_cosine",
@@ -1158,19 +1268,25 @@ def export_results(folder, artifacts):
         for row in artifacts["paper_evidence"]:
             writer.writerow({**row, "author_ids": ";".join(row["author_ids"])})
     with (folder/"recommended_teams.csv").open("w", newline="", encoding="utf-8") as f:
-        cols = ["rank", "professor_ids", "professor_names", "professor_departments",
-                "additional_count", "scientific_score", "brokerage_score", "combined_score",
-                "pareto_nondominated_in_discovered_pool"]
+        cols = ["rank", "professor_ids", "professor_name_department_pairs",
+                "additional_count", "objective_mode", "objective_score", "scientific_score",
+                "brokerage_score", "combined_score", "is_default", "within_science_tolerance",
+                "pareto_nondominated_in_discovered_pool",
+                "visited_by_greedy", "visited_by_randomized_search", "seen_as_final_run_team"]
         writer = csv.DictWriter(f, fieldnames=cols)
         writer.writeheader()
         for team in artifacts["result"]["recommended_teams"]:
-            writer.writerow({k: ";".join(team[k]) if k in
-                             ("professor_ids", "professor_names", "professor_departments")
-                             else team[k] for k in cols})
+            writer.writerow({
+                **{k: team[k] for k in cols if k not in
+                   ("professor_ids", "professor_name_department_pairs")},
+                "professor_ids": ";".join(team["professor_ids"]),
+                "professor_name_department_pairs": json.dumps(
+                    team["professor_name_department_pairs"], ensure_ascii=False),
+            })
     with (folder/"recommended_edges.csv").open("w", newline="", encoding="utf-8") as f:
-        cols = ["source", "source_name", "source_departments", "target", "target_name",
-                "target_departments", "already_observed_coauthors", "scientific_leave_one_out",
-                "brokerage_leave_one_out", "combined_leave_one_out"]
+        cols = ["source", "source_professor", "target", "target_professor",
+                "already_observed_coauthors", "scientific_leave_one_out",
+                "brokerage_leave_one_out", "combined_leave_one_out", "objective_leave_one_out"]
         writer = csv.DictWriter(f, fieldnames=cols)
         writer.writeheader()
         chosen = artifacts["result"]["selected_default_team"]
@@ -1179,27 +1295,13 @@ def export_results(folder, artifacts):
             p_id = p["professor_id"]
             link = next(link for link in chosen["hypothetical_collaboration_links"] if link["target"] == p_id)
             writer.writerow({"source": source,
-                             "source_name": directory[source]["name"],
-                             "source_departments": directory[source]["departments"],
+                             "source_professor": repr((directory[source]["name"],
+                                                       directory[source]["departments"])),
                              "target": p_id,
-                             "target_name": directory[p_id]["name"],
-                             "target_departments": directory[p_id]["departments"],
+                             "target_professor": repr((directory[p_id]["name"],
+                                                       directory[p_id]["departments"])),
                              "already_observed_coauthors": link["already_observed_coauthors"],
-                             **{key: p[key] for key in cols[7:]}})
-    with (folder/"rounds.csv").open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["seed", "round", "attempted_edits",
-                                               "accepted_edits", "team", "team_names",
-                                               "team_departments", "score"])
-        writer.writeheader()
-        for run in [artifacts["trace"]["greedy"]] + artifacts["trace"]["randomized_runs"]:
-            for row in run["rounds"]:
-                team_ids = row["team"]
-                writer.writerow({"seed": run["seed"],
-                                 **{k: ";".join(v) if k == "team" else v
-                                    for k, v in row.items()},
-                                 "team_names": ";".join(directory[p]["name"] for p in team_ids),
-                                 "team_departments": ";".join(directory[p]["departments"]
-                                                               for p in team_ids)})
+                             **{key: p[key] for key in cols[5:]}})
 
 
 def evolve(data, updates):
@@ -1284,9 +1386,13 @@ def main():
                           encoder=TextEncoder(model=QWEN_MODEL),
                           max_additional=MAX_ADDITIONAL,
                           lambda_network=LAMBDA_NETWORK,
+                          objective_mode=OBJECTIVE_MODE,
                           threshold_low=THRESHOLD_LOW,
                           threshold_high=THRESHOLD_HIGH,
                           evidence_label_threshold=EVIDENCE_LABEL_THRESHOLD,
+                          similarity_transform=SIMILARITY_TRANSFORM,
+                          rbf_beta=RBF_BETA,
+                          label_raw_cosine_cutoff=EVIDENCE_LABEL_RAW_COSINE,
                           restarts=RESTARTS, top_r=TOP_R, max_rounds=MAX_ROUNDS,
                           science_tolerance=SCIENCE_TOLERANCE, n_teams=N_TEAMS,
                           exact_check_max_candidates=EXACT_CHECK_MAX_CANDIDATES,
@@ -1295,15 +1401,39 @@ def main():
                           seed=SEED)
     export_results(OUTPUT_DIR, artifacts)
     result = artifacts["result"]
-    print(f"Found {result['discovered_unique_team_count']} unique teams; returned {len(result['recommended_teams'])}")
+    print(f"Objective mode: {result['objective_mode']} | "
+          f"Found {result['discovered_unique_team_count']} unique visited teams "
+          f"(greedy visited {result['greedy_visited_unique_team_count']}, "
+          f"randomized runs visited {result['randomized_visited_unique_team_count']}); "
+          f"returned {len(result['recommended_teams'])}")
+    origins = result["returned_team_search_origin_counts"]
+    print("Returned-team origins: "
+          f"greedy only={origins['greedy_only']}, "
+          f"randomized only={origins['randomized_only']}, "
+          f"both={origins['both']}, neither={origins['neither']}")
+    if result["initiator_only_scientific_score"] >= 1.0 - 1e-7:
+        print("WARNING: initiator alone has (almost) perfect scientific coverage; "
+              "the current brokerage witness rule requires external improvement "
+              "over initiator scores and can therefore produce all-zero brokerage.")
+    print(f"Similarity transform: {result['raw_similarity_calibration']['method']} "
+          f"(beta={result['raw_similarity_calibration']['rbf_beta']})")
+    print(f"Initiator-only science: {result['initiator_only_scientific_score']:.6f}")
+    print("Brokerage diagnostic: "
+          f"eligible boundary brokers={result['brokerage_method']['eligible_boundary_brokers']}, "
+          f"relevant external scientists={result['brokerage_method']['distinct_relevant_external_scientists']}")
+    print(f"Positive brokerage singleton candidates: {result['positive_singleton_broker_count']} "
+          f"| max singleton brokerage: {result['maximum_singleton_brokerage']:.8f}")
     for team in result["recommended_teams"]:
         members = "; ".join(
             f"{p['name']} ({p['departments'] or 'department unavailable'}, {p['id']})"
             for p in team["professors"])
         print(f"  #{team['rank']} {members}: "
-              f"science={team['scientific_score']:.3f} "
-              f"brokerage={team['brokerage_score']:.3f} "
-              f"combined={team['combined_score']:.3f}")
+              f"science={team['scientific_score']:.6f} "
+              f"brokerage={team['brokerage_score']:.6f} "
+              f"combined={team['combined_score']:.6f} "
+              f"objective={team['objective_score']:.6f} "
+              f"[greedy={team['visited_by_greedy']}, "
+              f"randomized={team['visited_by_randomized_search']}]")
     print(f"Saved to {OUTPUT_DIR}")
 
 if __name__ == "__main__":
