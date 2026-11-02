@@ -49,11 +49,11 @@ CACHE_NAME = "paper_retrieval_v1"           # or paper_retrieval_v1_sample_<LIMI
 EMBEDDING_CACHE_DIR = BASE_DIR / "embedding_cache" / QWEN_MODEL.rsplit("/", 1)[-1] / CACHE_NAME
 OUTPUT_DIR = EMBEDDING_CACHE_DIR / "topic_clusters_ncut_v1"
 
-N_CLUSTERS = 50                 # coarse topics, number is a research hyperparameter
-N_EIG = 50                  # number of spectral eigenvectors, >= N_CLUSTERS
+N_CLUSTERS = 85                 # coarse topics, number is a research hyperparameter
+N_EIG = 85                  # number of spectral eigenvectors, >= N_CLUSTERS
 NCUT_AFFINITY_SIGMA = 0.5      # cosine affinity strength (ncut-pytorch)
-NYSTROM_SAMPLES = 59878         # representative points, 2048 limits quadratic workspace
-NYSTROM_PROPAGATION_SAMPLES = 14969
+NYSTROM_SAMPLES = 100_000
+NYSTROM_PROPAGATION_SAMPLES = 25_000
 NYSTROM_NEIGHBORS = 32
 DEVICE = "auto"                # "auto", "cuda", or "cpu"; GPU recommended for 100k
 SEED = 67
