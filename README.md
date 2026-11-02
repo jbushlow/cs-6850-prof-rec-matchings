@@ -97,18 +97,22 @@ institutions:
 
 Optional `faculty_selector` constrains cards to those containing a faculty-specific child marker. Use a faculty-only page whenever possible. If a directory has multiple pages and a Next link, `next_page_selector` supports pagination; the collector does not auto-discover arbitrary pages. `rendered_html` uses the same extraction fields after loading the page in headless Chromium. `indexed_html` follows only links matching `detail_link_selector`, optionally filters detail pages by configured text, and uses `department_page_selector` to label records. Multiple sources combine, deduplicating normalized names **within an institution**. Directory conflicts in ORCID are retained as `directory_conflict` and are never auto-matched.
 
-Output: `output/faculty.csv`. Fields include `faculty_id`, `name`, `institution_id`, `department`, `profile_url`, `orcid`, `openalex_id`, and `match_status`. The initial `openalex_id` is blank.
+Output: `output/faculty.csv`. Before OpenAlex matching it contains one row per normalized directory name, with a stable `faculty_id`, official name, institution, department, profile URL, and optional ORCID.
 
 ## Stage 2: Resolve faculty authors and collect their work histories
 
 * Query `/authors?filter=affiliations.institution.id:<I...>` with cursor pagination for each configured institution. This finds publication-derived associations, **not employment classifications**. Sub-institutions can be listed in `affiliation_ids` (e.g. medical-school branches).
 * Intersect OpenAlex author names/alternatives with the **official** faculty roster (exact normalized name). Only a **unique match** is accepted, unless an ORCID explicitly extracted from the faculty roster disambiguates multiple candidates. Reject multiple candidates and conflicts; **no human review** and no guesses based on search rank. Missing a match is preferable to accepting a false brokerage node.
-* Batch matched faculty IDs in OR filters (config `author_batch_size`, default 20) to fetch full publication histories from the **curated core** with `corpus=core`. This reduces duplicate requests from coauthorship overlap. Request full single-work records only when list results truncate author or location lists.
+* Treat the official institution roster as the canonical identity source. Every exact-name, institution-affiliated OpenAlex profile is attached as an alias to that roster person.
+* Coalesce split OpenAlex profiles into one `faculty_id`, union and deduplicate their papers, and merge roster-name variants when they share an OpenAlex profile (for example, a name with and without a middle initial).
+* Preserve `openalex_ids`, `roster_names`, departments, and profile URLs for auditability. A primary `openalex_id` is retained only as a convenience field.
+* Batch matched OpenAlex profile IDs in OR filters when collecting unlimited histories. With a per-faculty paper cap, union alias-profile results first and apply the cap to the canonical faculty node.
+* Request full single-work records only when list results truncate author or location lists.
 * Keep only authorships whose OpenAlex IDs belong to the selected faculty roster. Students, postdocs, outside professors and other non-node coauthors are removed before raw work records are saved.
 * Compact retained authorships to the fields used downstream: faculty ID/name, byline position, institution IDs and raw affiliation strings. Location objects are reduced to the small set of landing-page URLs used for abstract recovery.
 * The stage does **not** require abstracts. All publications with usable authorships remain available for structural analysis.
 
-Outputs: `output/faculty.csv` (updated IDs/status), a compact `output/match_diagnostics.csv` (`faculty_id`, name, status and candidate IDs), and compressed `output/raw/papers_openalex.jsonl.gz` records. OpenAlex abstract inverted indexes are decoded to plain text before storage.
+Outputs: `output/faculty.csv` (canonical nodes and alias IDs), `output/match_diagnostics.csv` (roster names, status, candidate IDs, and profile URLs), and compressed `output/raw/papers_openalex.jsonl.gz` records. OpenAlex abstract inverted indexes are decoded to plain text before storage.
 
 **Scaling note:** A full institution-wide authors scan can be expensive in API credits; collecting thousands of institutions should move to the OpenAlex snapshot or a narrower roster-based lookup. Configure only the institutions you actually want, monitor usage, and reuse the HTTP cache. Free-key budgets and rate limits change; refer to current OpenAlex documentation before a large job.
 
@@ -133,7 +137,7 @@ Set `settings.abstract_fallbacks: false` to use only decoded OpenAlex abstracts 
 
 **Abstract validation is heuristic.** Minimum length and text checks do not guarantee semantic correctness, and some publishers label summaries as abstracts. The webpage fallback deliberately avoids generic SEO descriptions. Each recovered abstract carries source provenance. Provider access controls, robots rules and occasional missing DOI metadata reduce coverage. The script does not synthesize missing abstracts.
 
-Output: `output/papers.jsonl` (unique paper ID, DOI, title, year, all author IDs, abstract or `null`, status/source/source URL). Raw OpenAlex records remain separately available.
+Output: `output/papers.jsonl` (unique paper ID, DOI, title, year, canonical faculty IDs, contributing OpenAlex author IDs, abstract or `null`, status/source/source URL). Raw OpenAlex records remain separately available.
 
 ## Stages 4–5: Export data and collaboration networks
 
@@ -141,15 +145,14 @@ Outputs:
 
 | File | Content |
 |---|---|
-| `output/graph/authorships.csv` | Faculty-only authorship edges linking each paper to retained faculty nodes, byline order and publication affiliation IDs |
-| `output/graph/nodes.csv` | Selected faculty authors observed on collected papers |
-| `output/graph/coauthor_edges.csv` | Pairwise faculty projection; weight = number of shared papers |
-| `output/graph/faculty_edges.csv` | Subgraph of pairwise collaborations where **both endpoints** match a listed faculty member |
+| `output/graph/authorships.csv` | Paper-to-canonical-faculty incidence rows, including contributing OpenAlex aliases and publication affiliation IDs |
+| `output/graph/nodes.csv` | Official roster faculty nodes, including unmatched isolates and coalesced OpenAlex aliases |
+| `output/graph/faculty_edges.csv` | Pairwise faculty projection; weight = number of shared papers |
 | `output/graph/skipped_large_teams.csv` | Papers not projected into pairwise edges because of large author-team size |
 | `output/faculty_coverage.csv` | Per-faculty total papers, validated abstracts, coverage fraction, source breakdown |
 | `output/summary.json` | Dataset sizes and omissions |
 
-Coauthor edges have `author_a`, `author_b`, `weight`, `last_year`, `paper_ids` (JSON array stored in a CSV field). All join back through short OpenAlex IDs (`A...`, `W...`). Only selected faculty authorships are stored, so students and outside coauthors never become nodes. Papers with one selected faculty author remain part of that professor's publication history but create no pairwise edge.
+Faculty edges have `author_a`, `author_b`, `weight`, `last_year`, `paper_ids` (JSON array stored in a CSV field). `author_a` and `author_b` are stable roster `faculty_id` values; paper IDs remain short OpenAlex `W...` IDs. OpenAlex `A...` profile aliases are retained on nodes and authorship rows for provenance. Students and outside coauthors never become nodes. Papers with one selected faculty author remain part of that professor's publication history but create no pairwise edge.
 
 Set `settings.graphml: true` to additionally export NetworkX GraphML graphs (can consume substantial memory for larger datasets). The paper–author relationship is the primary representation: a multi-authored paper is a hyperedge, and a pairwise projection is a modeling decision.
 
@@ -159,7 +162,7 @@ Set `settings.graphml: true` to additionally export NetworkX GraphML graphs (can
 
 - Stable `A...`, `W...`, `I...` OpenAlex identifiers; deduplication across faculty and paper lists.
 - Cursor pagination for institution author search and grouped faculty-work queries.
-- Conservative identity resolution with explicit `not_found`, `ambiguous_name`, and `orcid_conflict` statuses.
+- Institution-scoped roster identity with explicit coalescing of same-name OpenAlex profiles and shared-profile roster-name variants.
 - Rate-paced HTTP GET requests, retry/backoff on 429/5xx, 35-second timeouts, disk cache, and safe re-runs.
 - Never commit credentials: use environment variables and keep `.env` out of git.
 - `--refresh-http` disables HTTP cache for **that run**, and `--retry-failed-abstracts` re-attempts stored missing records.

@@ -6,7 +6,7 @@ from facultygraph.common import normalize_doi, read_csv, read_jsonl, write_csv, 
 from facultygraph.faculty import (collect_faculty, parse_directory_html,
                                   load_indexed_html_source, canonical_profile_url)
 from facultygraph.openalex import (WORK_SELECT, _needs_full_work, compact_work,
-                                   match_one, collect_openalex)
+                                   match_one, coalesce_faculty, collect_openalex)
 from facultygraph.abstracts import (decode_inverted_index, valid_abstract, extract_html_abstract,
                                     AbstractCollector)
 from facultygraph.graph import build_graph
@@ -155,12 +155,33 @@ def _author(aid,name,inst="I20",orcid=""):
             "orcid":orcid,"observed_orcids":[],"affiliations":[{"institution":{"id":"https://openalex.org/"+inst},"years":[2023]}],
             "last_known_institutions":[]}
 
-def test_match_rejects_ambiguous_and_accepts_directory_orcid():
+def test_match_coalesces_all_same_name_profiles():
     one=_author("A123","Walker White")
     two=_author("A456","Walker White",orcid="https://orcid.org/0000-0002-1825-0097")
-    assert match_one({"name":"Walker White","orcid":""},[one,two])[1]=="ambiguous_name"
-    assert match_one({"name":"Walker White","orcid":"0000-0002-1825-0097"},[one,two])[:2] == ("A456","matched_orcid")
+    match = match_one({"name":"Walker White","orcid":""},[one,two])
+    assert match[:2] == ("A456", "matched_coalesced_profiles")
+    assert set(match[2]) == {"A123", "A456"}
     assert match_one({"name":"Someone Else","orcid":""},[one])[1]=="not_found"
+
+
+def test_coalesce_faculty_merges_roster_name_variants_sharing_an_openalex_profile():
+    rows = [
+        dict(faculty_id="f1",name="Jon Kleinberg",institution_name="A",institution_id="I20",
+             department="CS",profile_url="https://a.edu/jon",orcid="",faculty_source="one",
+             openalex_id="",match_status="unmatched"),
+        dict(faculty_id="f2",name="Jon M. Kleinberg",institution_name="A",institution_id="I20",
+             department="IS",profile_url="https://b.a.edu/jon",orcid="",faculty_source="two",
+             openalex_id="",match_status="unmatched"),
+    ]
+    author = _author("A123", "Jon M. Kleinberg")
+    author["display_name_alternatives"] = ["Jon Kleinberg"]
+    merged, diagnostics = coalesce_faculty(rows, {"f1":[author], "f2":[author]})
+    assert len(merged) == 1
+    assert merged[0]["name"] == "Jon M. Kleinberg"
+    assert merged[0]["department"] == "CS; IS"
+    assert merged[0]["openalex_ids"] == "A123"
+    assert merged[0]["match_status"] == "matched_coalesced_names"
+    assert diagnostics[0]["roster_names"] == "Jon Kleinberg|Jon M. Kleinberg"
 
 def _work(wid, authors, abstract=None):
     return {"id":"https://openalex.org/"+wid,"title":"Research collaboration paper",
@@ -210,18 +231,23 @@ def test_end_to_end_with_fake_openalex_and_abstracts(tmp_path):
     w1=_work("W1",["A1","A2","A3"],index)
     w2=_work("W2",["A1","A3"],None)
     w3=_work("W3",["A2","A4"],None)
-    api=FakeOpenAlex([_author("A1","Alice Smith"),_author("A2","Bob Jones"),_author("A3","Student One")],
-                    {"A1":[w1,w2],"A2":[w1,w3]})
+    w4=_work("W4",["A5"],None)
+    api=FakeOpenAlex([_author("A1","Alice Smith"),_author("A5","Alice Smith"),
+                      _author("A2","Bob Jones"),_author("A3","Student One")],
+                    {"A1":[w1,w2],"A5":[w4],"A2":[w1,w3]})
     faculty, work_map = collect_openalex({"institutions":[]},api,output)
-    assert {f["openalex_id"] for f in faculty}=={"A1","A2"}
-    assert len(work_map)==3
+    assert {f["openalex_id"] for f in faculty}=={"A5","A2"}
+    alice = next(f for f in faculty if f["name"] == "Alice Smith")
+    assert alice["openalex_ids"] == "A1|A5"
+    assert alice["match_status"] == "matched_coalesced_profiles"
+    assert len(work_map)==4
     assert (output/"raw"/"papers_openalex.jsonl.gz").exists()
     assert not (output/"raw"/"papers_openalex.jsonl").exists()
     assert list(read_csv(output/"match_diagnostics.csv")[0]) == [
-        "faculty_id", "name", "match_status", "candidate_ids"
+        "faculty_id", "name", "roster_names", "match_status", "candidate_ids", "profile_urls"
     ]
     assert all(
-        {a["author"]["id"].rsplit("/", 1)[-1] for a in work["authorships"]} <= {"A1", "A2"}
+        {a["author"]["id"].rsplit("/", 1)[-1] for a in work["authorships"]} <= {"A1", "A2", "A5"}
         for work in work_map.values()
     )
     assert api.calls[0]==("authors","affiliations.institution.id:I20")
@@ -234,16 +260,17 @@ def test_end_to_end_with_fake_openalex_and_abstracts(tmp_path):
         def _html(self,w): return None
     collector=TestCollector(FakeHttp({}),output,{"abstract_min_words":15})
     docs=collector.run()
-    assert len(docs)==3
+    assert len(docs)==4
     assert sum(x["abstract_status"]=="found" for x in docs)==1
     stats=build_graph(output,{"max_clique_authors":100})
-    assert stats["papers"]==3
+    assert stats["papers"]==4
     assert stats["projected_faculty_edges"]==1
-    assert stats["projected_coauthor_edges"]==1
-    edges=read_csv(output/"graph"/"coauthor_edges.csv")
-    assert edges[0]["author_a"]=="A1" and edges[0]["author_b"]=="A2"
+    assert "projected_coauthor_edges" not in stats
+    assert not (output/"graph"/"coauthor_edges.csv").exists()
+    edges=read_csv(output/"graph"/"faculty_edges.csv")
+    assert edges[0]["author_a"]=="f1" and edges[0]["author_b"]=="f2"
     coverage=read_csv(output/"faculty_coverage.csv")
-    assert next(r for r in coverage if r["openalex_id"]=="A1")["abstract_fraction"]=="0.5"
+    assert next(r for r in coverage if r["faculty_id"]=="f1")["abstract_fraction"]=="0.33333"
     # Result cache means second pass emits no new extraction calls
     previous=len(list(read_jsonl(output/"state"/"abstract_results.jsonl")))
     collector.run()

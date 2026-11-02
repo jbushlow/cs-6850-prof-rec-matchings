@@ -5,7 +5,6 @@
   "papers": 11765,
   "papers_with_abstracts": 8624,
   "authors_in_retrieved_papers": 87,
-  "projected_coauthor_edges": 135,
   "projected_faculty_edges": 135,
   "skipped_large_team_papers": 0,
   "max_clique_authors": 100

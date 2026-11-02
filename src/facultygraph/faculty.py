@@ -9,7 +9,9 @@ from .common import normalize_orcid, orcid_from_href, normalized_name, stable_id
 from .progress import progress_bar
 
 LOG = logging.getLogger(__name__)
-FIELDS = ["faculty_id", "name", "institution_name", "institution_id", "department", "profile_url", "orcid", "faculty_source", "openalex_id", "match_status"]
+FIELDS = ["faculty_id", "name", "roster_names", "institution_name", "institution_id",
+          "department", "profile_url", "profile_urls", "orcid", "faculty_source",
+          "openalex_id", "openalex_ids", "roster_record_count", "match_status"]
 
 
 def canonical_profile_url(url):

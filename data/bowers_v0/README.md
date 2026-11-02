@@ -28,8 +28,6 @@ data.
 - `graph/nodes.csv`: matched faculty nodes.
 - `graph/authorships.csv`: faculty-to-paper incidence records.
 - `graph/faculty_edges.csv`: faculty-only projection; `weight` is shared-paper count.
-- `graph/coauthor_edges.csv`: coauthor projection (identical to the faculty projection
-  in this faculty-only dataset).
 - `graph/skipped_large_teams.csv`: works omitted from projection due to clique limits.
 - `summary.json`: machine-readable dataset counts.
 

@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import quote, urlparse
 from bs4 import BeautifulSoup
 from .common import (normalize_doi, short_id, append_jsonl, decode_inverted_index,
-                     read_jsonl, write_jsonl)
+                     read_csv, read_jsonl, write_jsonl)
 from .http import FetchError
 from .progress import progress_iter
 LOG = logging.getLogger(__name__)
@@ -267,6 +267,13 @@ class AbstractCollector:
         docs = []
         source_counts = {}
         works = list(read_jsonl(src))
+        faculty = read_csv(self.out/"faculty.csv")
+        alias_to_faculty = {}
+        for row in faculty:
+            aliases = (row.get("openalex_ids") or row.get("openalex_id") or "").split("|")
+            for alias in aliases:
+                aid = short_id(alias, "A")
+                if aid: alias_to_faculty[aid] = row["faculty_id"]
         progress = progress_iter(works, settings=self.settings, desc="Abstract recovery",
                                  unit="paper", total=len(works))
         self._progress = progress
@@ -276,11 +283,16 @@ class AbstractCollector:
             self._show_attempt(work, f"done: {result['source'] or 'missing'}")
             source = result["source"] or "missing"
             source_counts[source] = source_counts.get(source,0)+1
+            openalex_author_ids = [short_id(a.get("author",{}).get("id"),"A")
+                                   for a in work.get("authorships") or [] if a.get("author",{}).get("id")]
+            faculty_ids = list(dict.fromkeys(alias_to_faculty[aid] for aid in openalex_author_ids
+                                             if aid in alias_to_faculty))
             docs.append({"openalex_id":short_id(work.get("id"),"W"),
                          "doi":normalize_doi(work.get("doi")) or None,
                          "title":work.get("title"),"year":work.get("publication_year"),
                          "date":work.get("publication_date"),"type":work.get("type"),
-                         "author_ids":[short_id(a.get("author",{}).get("id"),"A") for a in work.get("authorships") or [] if a.get("author",{}).get("id")],
+                         "author_ids":faculty_ids,
+                         "openalex_author_ids":openalex_author_ids,
                          "abstract":result["abstract"],"abstract_status":result["status"],
                          "abstract_source":result["source"],"abstract_source_url":result["source_url"],
                          "publication_url":(work.get("primary_location") or {}).get("landing_page_url")})

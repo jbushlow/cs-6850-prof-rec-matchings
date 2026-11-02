@@ -1,5 +1,5 @@
 settings:
-  output_dir: output
+  output_dir: output/cornell-stem
   cache_dir: .cache/http
 
   # Leave blank to use RESEARCH_CONTACT_EMAIL from the environment.
@@ -9,12 +9,14 @@ settings:
   # Twenty is a conservative starting point.
   author_batch_size: 20
 
-  # Development limits. Use null only after validating the first run.
+  # Use every confidently matched Cornell faculty author, but cap each
+  # publication history to keep the all-school dataset manageable.
   max_faculty: null
-  max_papers_per_author: 25
+  max_papers_per_author: 40
 
   abstract_min_words: 10
-  abstract_fallbacks: true
+  # Use decoded OpenAlex abstracts only; skip all external recovery providers.
+  abstract_fallbacks: false
   abstract_max_attempts: 3
   abstract_request_timeout: 20
   max_landing_pages: 2
