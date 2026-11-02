@@ -46,7 +46,7 @@ NODES_CSV = BASE_DIR / "data/nodes.csv"
 AUTHORSHIPS_CSV = BASE_DIR / "data/authorships.csv"
 PAPERS_JSONL_GZ = BASE_DIR / "data/papers.jsonl.gz"
 FACULTY_EDGES_CSV = BASE_DIR / "data/faculty_edges.csv"
-QUERY_JSON = BASE_DIR / "examples/proposal_real_faculty.json"
+QUERY_JSON = BASE_DIR / "examples/proposal_real_faculty2.json"
 OUTPUT_DIR = BASE_DIR / "output_real_faculty"
 
 # How to handle a paper with no abstract: "title", "skip", or "error".
@@ -930,7 +930,10 @@ def team_record(team, obj, profs, requirements, selected_evidence):
         best = selected_evidence[owner][j]
         need_details.append({"requirement_id": req["id"], "description": req["description"],
                              "weight": req["weight"], "team_quality": round(float(obj.scores[owner][j]), 7),
-                             "best_professor_id": owner, "best_paper": best})
+                             "best_professor_id": owner,
+                             "best_professor_name": profs[owner]["name"],
+                             "best_professor_departments": profs[owner].get("departments", ""),
+                             "best_paper": best})
     contributions = []
     for p in sorted(team):
         without = team-{p}
@@ -941,18 +944,25 @@ def team_record(team, obj, profs, requirements, selected_evidence):
                                  "professor_requirement_score": round(float(obj.scores[p][j]), 7),
                                  "best_paper": selected_evidence[p][j]})
         contributions.append({"professor_id": p, "name": profs[p]["name"],
+                              "departments": profs[p].get("departments", ""),
                               "scientific_leave_one_out": round(obj.science(team)-obj.science(without), 7),
                               "brokerage_leave_one_out": round(obj.network(team)-obj.network(without), 7),
                               "combined_leave_one_out": round(obj.value(team)-obj.value(without), 7),
                               "supporting_papers_by_requirement": evidence,
                               "brokerage_path_evidence": obj.brokerage_explanation(p, team)})
     return {"professor_ids": full, "additional_professor_ids": sorted(team),
+            "professor_names": [profs[p]["name"] for p in full],
+            "professor_departments": [profs[p].get("departments", "") for p in full],
             "hypothetical_collaboration_links": [
-                {"source": obj.u, "target": p, "directed": False,
+                {"source": obj.u, "source_name": profs[obj.u]["name"],
+                 "source_departments": profs[obj.u].get("departments", ""),
+                 "target": p, "target_name": profs[p]["name"],
+                 "target_departments": profs[p].get("departments", ""), "directed": False,
                  "already_observed_coauthors": obj.g.has_edge(obj.u, p),
                  "would_be_new_edge": not obj.g.has_edge(obj.u, p)}
                 for p in sorted(team)],
-            "professors": [{"id": p, "name": profs[p]["name"]} for p in full],
+            "professors": [{"id": p, "name": profs[p]["name"],
+                            "departments": profs[p].get("departments", "")} for p in full],
             "additional_count": len(team), "scientific_score": round(comps["scientific"], 7),
             "brokerage_score": round(comps["brokerage"], 7),
             "combined_score": round(comps["combined"], 7),
@@ -1060,6 +1070,8 @@ def recommend(data, query, *, encoder=None, max_additional=3, lambda_network=0.2
         del run["visited"]
     query_graph = make_query_evidence_graph(graph_out, reqs, paper_rows)
     result = {"project_title": query.get("title", ""), "initiator_id": u,
+              "initiator_name": profs[u]["name"],
+              "initiator_departments": profs[u].get("departments", ""),
               "model": "paper_evidence_qwen3_structural_holes_v1", "encoder_backend": encoder.backend,
               "encoder_model": encoder.model,
               "max_additional_professors": max_additional,
@@ -1099,12 +1111,20 @@ def recommend(data, query, *, encoder=None, max_additional=3, lambda_network=0.2
                   "Scores are relative to the candidate papers for this project unless fixed calibration cutoffs were supplied.",
                   "Title-only papers use the title as the evidence passage; title-based evidence is less detailed than abstract-based evidence."
               ]}
+    professor_directory = [
+        {"professor_id": p, "name": profs[p]["name"],
+         "departments": profs[p].get("departments", "")}
+        for p in sorted(profs)
+    ]
     return {"result": result, "requirements": reqs, "graph": graph_out,
+            "professor_directory": professor_directory,
             "query_graph": query_graph,
             "topic_papers": [{"paper_id": pid, "cluster_id": int(topics["paper_cluster"][pid])}
                              for pid in retrieval["paper_ids"]],
             "paper_evidence": paper_rows, "professor_requirement_scores":
                 [{"professor_id": p, "requirement_id": reqs[j]["id"],
+                  "professor_name": profs[p]["name"],
+                  "professor_departments": profs[p].get("departments", ""),
                   "score": round(float(scores[p][j]), 7), "best_paper": evidence[p][j]}
                  for p in sorted(profs) for j in range(len(reqs))],
             "trace": {"greedy": runs[0], "randomized_runs": runs[1:]}}
@@ -1115,12 +1135,19 @@ def export_results(folder, artifacts):
     folder.mkdir(parents=True, exist_ok=True)
     for key, filename in [("result", "recommendations.json"),
                           ("requirements", "requirements.json"), ("graph", "graph.json"),
+                          ("professor_directory", "professor_directory.json"),
                           ("query_graph", "query_evidence_graph.json"),
                           ("topic_papers", "paper_topic_assignments.json"),
                           ("paper_evidence", "paper_evidence.json"),
                           ("professor_requirement_scores", "professor_scores.json"),
                           ("trace", "trace.json")]:
         save_json(folder/filename, artifacts[key])
+    directory = {row["professor_id"]: row for row in artifacts["professor_directory"]}
+    with (folder/"professor_directory.csv").open("w", newline="", encoding="utf-8") as f:
+        cols = ["professor_id", "name", "departments"]
+        writer = csv.DictWriter(f, fieldnames=cols)
+        writer.writeheader()
+        writer.writerows(artifacts["professor_directory"])
     with (folder/"paper_evidence.csv").open("w", newline="", encoding="utf-8") as f:
         cols = ["requirement_id", "paper_id", "title", "author_ids", "text_source", "score",
                 "raw_combined_cosine", "document_cosine", "sentence_cosine", "project_document_cosine",
@@ -1131,14 +1158,19 @@ def export_results(folder, artifacts):
         for row in artifacts["paper_evidence"]:
             writer.writerow({**row, "author_ids": ";".join(row["author_ids"])})
     with (folder/"recommended_teams.csv").open("w", newline="", encoding="utf-8") as f:
-        cols = ["rank", "professor_ids", "additional_count", "scientific_score", "brokerage_score",
-                "combined_score", "pareto_nondominated_in_discovered_pool"]
+        cols = ["rank", "professor_ids", "professor_names", "professor_departments",
+                "additional_count", "scientific_score", "brokerage_score", "combined_score",
+                "pareto_nondominated_in_discovered_pool"]
         writer = csv.DictWriter(f, fieldnames=cols)
         writer.writeheader()
         for team in artifacts["result"]["recommended_teams"]:
-            writer.writerow({k: ";".join(team[k]) if k == "professor_ids" else team[k] for k in cols})
+            writer.writerow({k: ";".join(team[k]) if k in
+                             ("professor_ids", "professor_names", "professor_departments")
+                             else team[k] for k in cols})
     with (folder/"recommended_edges.csv").open("w", newline="", encoding="utf-8") as f:
-        cols = ["source", "target", "already_observed_coauthors", "scientific_leave_one_out", "brokerage_leave_one_out", "combined_leave_one_out"]
+        cols = ["source", "source_name", "source_departments", "target", "target_name",
+                "target_departments", "already_observed_coauthors", "scientific_leave_one_out",
+                "brokerage_leave_one_out", "combined_leave_one_out"]
         writer = csv.DictWriter(f, fieldnames=cols)
         writer.writeheader()
         chosen = artifacts["result"]["selected_default_team"]
@@ -1146,15 +1178,28 @@ def export_results(folder, artifacts):
             source = artifacts["result"]["initiator_id"]
             p_id = p["professor_id"]
             link = next(link for link in chosen["hypothetical_collaboration_links"] if link["target"] == p_id)
-            writer.writerow({"source": source, "target": p_id,
+            writer.writerow({"source": source,
+                             "source_name": directory[source]["name"],
+                             "source_departments": directory[source]["departments"],
+                             "target": p_id,
+                             "target_name": directory[p_id]["name"],
+                             "target_departments": directory[p_id]["departments"],
                              "already_observed_coauthors": link["already_observed_coauthors"],
-                             **{key: p[key] for key in cols[3:]}})
+                             **{key: p[key] for key in cols[7:]}})
     with (folder/"rounds.csv").open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["seed", "round", "attempted_edits", "accepted_edits", "team", "score"])
+        writer = csv.DictWriter(f, fieldnames=["seed", "round", "attempted_edits",
+                                               "accepted_edits", "team", "team_names",
+                                               "team_departments", "score"])
         writer.writeheader()
         for run in [artifacts["trace"]["greedy"]] + artifacts["trace"]["randomized_runs"]:
             for row in run["rounds"]:
-                writer.writerow({"seed": run["seed"], **{k: ";".join(v) if k == "team" else v for k, v in row.items()}})
+                team_ids = row["team"]
+                writer.writerow({"seed": run["seed"],
+                                 **{k: ";".join(v) if k == "team" else v
+                                    for k, v in row.items()},
+                                 "team_names": ";".join(directory[p]["name"] for p in team_ids),
+                                 "team_departments": ";".join(directory[p]["departments"]
+                                                               for p in team_ids)})
 
 
 def evolve(data, updates):
@@ -1252,7 +1297,10 @@ def main():
     result = artifacts["result"]
     print(f"Found {result['discovered_unique_team_count']} unique teams; returned {len(result['recommended_teams'])}")
     for team in result["recommended_teams"]:
-        print(f"  #{team['rank']} {','.join(team['professor_ids'])}: "
+        members = "; ".join(
+            f"{p['name']} ({p['departments'] or 'department unavailable'}, {p['id']})"
+            for p in team["professors"])
+        print(f"  #{team['rank']} {members}: "
               f"science={team['scientific_score']:.3f} "
               f"brokerage={team['brokerage_score']:.3f} "
               f"combined={team['combined_score']:.3f}")
