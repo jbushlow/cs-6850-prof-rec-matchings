@@ -29,7 +29,7 @@ MAX_SEQ_LENGTH = 2048
 DTYPE = "float16"                 # float16 or float32
 DEVICE = "auto"                   # auto, cuda or cpu
 LIMIT = None                      # None = all distinct papers
-OVERWRITE = False                 # Only affects the NEW cache directory
+OVERWRITE = True                 # Only affects the NEW cache directory
 # =================================================================
 
 
@@ -179,10 +179,57 @@ def check_shards(root: Path, kind: str, entries: list[dict], torch):
     return missing, count
 
 
-def save_missing(root, kind, entries, parts, count, model, torch, np):
+
+def check_token_lengths(chunk, tokenizer, kind, stats, prompt=""):
+    texts = [prompt + row["text"] for row in chunk]
+
+    encoded = tokenizer(
+        texts,
+        add_special_tokens=True,
+        truncation=False,
+        padding=False,
+        return_attention_mask=False,
+    )
+
+    lengths = [len(ids) for ids in encoded["input_ids"]]
+    hit = sum(n > MAX_SEQ_LENGTH for n in lengths)
+    near = sum(n >= MAX_SEQ_LENGTH * 0.9 for n in lengths)
+
+    stats[kind]["total"] += len(lengths)
+    stats[kind]["hit"] += hit
+    stats[kind]["near"] += near
+    stats[kind]["max"] = max(stats[kind]["max"], max(lengths, default=0))
+
+    s = stats[kind]
+    print(
+        f"\n[TOKEN CHECK: {kind}] "
+        f"Current shard: {hit}/{len(lengths)} truncated | "
+        f"Overall: {s['hit']}/{s['total']} "
+        f"({100 * s['hit'] / s['total']:.2f}%) | "
+        f"Near limit: {s['near']} | "
+        f"Longest: {s['max']} tokens",
+        flush=True,
+    )
+
+
+
+def save_missing(root, kind, entries, parts, count, model, torch, np, stats):
     for part in parts:
         chunk = entries[part * SHARD_SIZE:(part + 1) * SHARD_SIZE]
         print(f"[{kind} {part+1}/{count}] Embedding {len(chunk)} texts...", flush=True)
+        check_token_lengths(
+            chunk,
+            model.tokenizer,
+            kind,
+            stats,
+            prompt=next(
+                (model.prompts[name]
+                 for name in ("document", "passage", "corpus")
+                 if name in model.prompts),
+                "",
+            ),
+        ) 
+        
         with torch.inference_mode():
             result = model.encode_document(
                 [r["text"] for r in chunk], batch_size=BATCH_SIZE,
@@ -310,8 +357,14 @@ def run():
         model.eval()
         if not hasattr(model, "encode_document"):
             raise SystemExit("Update sentence-transformers: encode_document() is required")
-        save_missing(root, "documents", documents, doc_missing, nd, model, torch, np)
-        save_missing(root, "passages", passages, passage_missing, npa, model, torch, np)
+        
+        stats = {
+            "documents": {"total": 0, "hit": 0, "near": 0, "max": 0},
+            "passages": {"total": 0, "hit": 0, "near": 0, "max": 0},
+        }
+ 
+        save_missing(root, "documents", documents, doc_missing, nd, model, torch, np, stats)
+        save_missing(root, "passages", passages, passage_missing, npa, model, torch, np, stats)
 
     write_indexes(root, papers, documents, passages)
     example = torch.load(root / "documents" / "shards" / "part_00000.pt",
