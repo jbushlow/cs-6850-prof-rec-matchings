@@ -2,7 +2,8 @@ import csv
 import json
 from pathlib import Path
 import pytest
-from facultygraph.common import normalize_doi, read_csv, read_jsonl, write_csv, write_jsonl
+from facultygraph.common import (identity_name_key, normalize_doi, read_csv, read_jsonl,
+                                 write_csv, write_jsonl)
 from facultygraph.faculty import (collect_faculty, parse_directory_html,
                                   load_indexed_html_source, canonical_profile_url)
 from facultygraph.openalex import (WORK_SELECT, _needs_full_work, compact_work,
@@ -87,6 +88,24 @@ def test_indexed_directory_discovers_filters_and_deduplicates_pages():
         ("Jane Doe", "Anthropology", "https://a.edu/people/jane")
     ]
     assert [call[0] for call in http.calls] == [index_url, anthropology, program]
+
+
+def test_directory_can_normalize_last_comma_first_names_and_link_whitespace():
+    html = '''<table><tbody><tr><td class="name">
+              <a href="/jane-doe ">Doe, Jane Q.</a>
+              </td></tr></tbody></table>'''
+    source = {
+        "card_selector": "tbody tr",
+        "name_selector": "td.name a",
+        "profile_link_selector": "td.name a",
+        "name_format": "last_comma_first",
+        "default_department": "Medicine",
+    }
+    rows, _ = parse_directory_html(
+        html, "https://a.edu/faculty", {"name": "A", "openalex_id": "I20"}, source
+    )
+    assert rows[0]["name"] == "Jane Q. Doe"
+    assert rows[0]["profile_url"] == "https://a.edu/jane-doe"
 
 
 def test_cross_host_profile_aliases_merge_but_same_host_profiles_conflict(tmp_path):
@@ -182,6 +201,33 @@ def test_coalesce_faculty_merges_roster_name_variants_sharing_an_openalex_profil
     assert merged[0]["openalex_ids"] == "A123"
     assert merged[0]["match_status"] == "matched_coalesced_names"
     assert diagnostics[0]["roster_names"] == "Jon Kleinberg|Jon M. Kleinberg"
+
+
+def test_identity_name_key_uses_complete_given_name_not_shared_initial():
+    assert identity_name_key("Jon M. Kleinberg") == identity_name_key("Jon Kleinberg")
+    assert identity_name_key("B. Franklin Pugh") == identity_name_key("Frank Pugh")
+    assert identity_name_key("Y. Samuel Wang") != identity_name_key("Yi Wang")
+
+
+def test_coalesce_faculty_does_not_bridge_incompatible_roster_names():
+    rows = [
+        dict(faculty_id="arnab", name="Arnab K. Basu", institution_name="A", institution_id="I20",
+             department="Economics", profile_url="https://a.edu/arnab", orcid="", faculty_source="one",
+             openalex_id="", match_status="unmatched"),
+        dict(faculty_id="kaushik", name="Kaushik Basu", institution_name="A", institution_id="I20",
+             department="Economics; Philosophy", profile_url="https://a.edu/kaushik", orcid="",
+             faculty_source="two", openalex_id="", match_status="unmatched"),
+    ]
+    contaminated = _author("A1", "Kaushik Basu")
+    contaminated["display_name_alternatives"] = ["Arnab K. Basu"]
+    arnab = _author("A2", "Arnab K. Basu")
+    merged, _ = coalesce_faculty(
+        rows, {"arnab": [contaminated, arnab], "kaushik": [contaminated]}
+    )
+    assert len(merged) == 2
+    by_name = {row["name"]: row for row in merged}
+    assert by_name["Arnab K. Basu"]["openalex_ids"] == "A2"
+    assert by_name["Kaushik Basu"]["openalex_ids"] == "A1"
 
 def _work(wid, authors, abstract=None):
     return {"id":"https://openalex.org/"+wid,"title":"Research collaboration paper",

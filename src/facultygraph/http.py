@@ -91,6 +91,14 @@ class Http:
                 parser = RobotFileParser()
                 parser.parse((rules or "").splitlines())
                 self.robots[base] = parser
+                # Respect an explicit crawl delay when a public directory asks
+                # automated clients to pace requests more slowly than our
+                # normal host default.
+                crawl_delay = parser.crawl_delay("FacultyNetworkResearch")
+                if crawl_delay is None:
+                    crawl_delay = parser.crawl_delay("*")
+                if crawl_delay is not None:
+                    self.rates[hostname] = max(self.rates.get(hostname, 1.5), float(crawl_delay))
             except FetchError:
                 self.robots[base] = False
         parser = self.robots[base]

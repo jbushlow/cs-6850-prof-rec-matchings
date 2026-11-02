@@ -28,6 +28,28 @@ def normalized_name(value):
     return " ".join(value.split())
 
 
+def identity_name_key(value):
+    """Return a conservative key for deciding whether roster names are aliases.
+
+    Keep the first complete given name and surname, ignoring middle names and
+    initials. A leading initial therefore does not hide the useful given name
+    in ``Y. Samuel Wang`` or ``B. Franklin Pugh``. The deliberately small
+    nickname map covers variants observed in the Cornell directories without
+    turning a shared first initial into evidence that two people are the same.
+    """
+    raw = (value or "").strip()
+    if "," in raw:
+        last, given = raw.split(",", 1)
+        raw = f"{given.strip()} {last.strip()}"
+    tokens = normalized_name(raw).split()
+    if len(tokens) < 2:
+        return tuple(tokens)
+    surname = tokens[-1]
+    given = next((token for token in tokens[:-1] if len(token) > 1), tokens[0])
+    given = {"frank": "franklin"}.get(given, given)
+    return given, surname
+
+
 def normalize_orcid(value):
     value = (value or "").strip().rstrip("/").split("/")[-1].upper()
     return value if re.fullmatch(r"\d{4}-\d{4}-\d{4}-[\dX]{4}", value) else ""

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from collections import defaultdict
-from .common import (normalized_name, short_id,
+from .common import (identity_name_key, normalized_name, short_id,
                      decode_inverted_index, read_csv, stable_id, write_csv, write_jsonl)
 from .faculty import FIELDS
 from .progress import progress_bar, progress_iter
@@ -100,9 +100,12 @@ def coalesce_faculty(faculty, candidates_by_faculty):
     """Build canonical roster nodes from connected roster-name/OpenAlex-ID groups.
 
     Exact same-name OpenAlex profiles are aliases of one official roster node.
-    Different roster-name variants are also merged when they share an OpenAlex ID.
+    Compatible roster-name variants are also merged when they share an OpenAlex
+    ID. If one noisy OpenAlex profile claims incompatible roster names, its
+    primary display name selects one identity instead of bridging those people.
     """
     parent = {row["faculty_id"]: row["faculty_id"] for row in faculty}
+    rows_by_id = {row["faculty_id"]: row for row in faculty}
 
     def find(value):
         while parent[value] != value:
@@ -114,12 +117,27 @@ def coalesce_faculty(faculty, candidates_by_faculty):
         left, right = find(left), find(right)
         if left != right: parent[max(left, right)] = min(left, right)
 
-    owners = {}
+    claims = defaultdict(dict)
     for row in faculty:
         for author in candidates_by_faculty.get(row["faculty_id"], []):
             key = (row["institution_id"], short_id(author.get("id"), "A"))
-            if key in owners: union(row["faculty_id"], owners[key])
-            else: owners[key] = row["faculty_id"]
+            claims[key][row["faculty_id"]] = author
+
+    filtered_candidates = defaultdict(list)
+    for claimants in claims.values():
+        author = next(iter(claimants.values()))
+        by_name_key = defaultdict(list)
+        for faculty_id in claimants:
+            by_name_key[identity_name_key(rows_by_id[faculty_id]["name"])].append(faculty_id)
+        selected = list(claimants)
+        if len(by_name_key) > 1:
+            selected = by_name_key.get(identity_name_key(author.get("display_name", "")), [])
+        if not selected:
+            continue
+        owner = selected[0]
+        for faculty_id in selected:
+            union(owner, faculty_id)
+            filtered_candidates[faculty_id].append(author)
 
     groups = defaultdict(list)
     for row in faculty: groups[find(row["faculty_id"])].append(row)
@@ -130,7 +148,7 @@ def coalesce_faculty(faculty, candidates_by_faculty):
         representative = max(rows, key=lambda r: (len(normalized_name(r["name"]).split()), len(r["name"]), r["name"]))
         authors = {}
         for row in rows:
-            for author in candidates_by_faculty.get(row["faculty_id"], []):
+            for author in filtered_candidates.get(row["faculty_id"], []):
                 authors[short_id(author.get("id"), "A")] = author
         aliases = sorted(authors)
         primary = max(aliases, key=lambda aid: (int(authors[aid].get("works_count") or 0), aid)) if aliases else ""

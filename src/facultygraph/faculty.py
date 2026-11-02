@@ -62,8 +62,12 @@ def parse_directory_html(html, url, institution, source):
         el = card.select_one(source["name_selector"])
         if not el: continue
         name = el.get_text(" ", strip=True)
+        if source.get("name_format") == "last_comma_first" and "," in name:
+            last, first = name.split(",", 1)
+            name = f"{first.strip()} {last.strip()}"
         link = card.select_one(source.get("profile_link_selector", "a[href]"))
-        profile = urljoin(url, link.get("href", "")) if link and link.get("href") else ""
+        href = link.get("href", "").strip() if link else ""
+        profile = urljoin(url, href) if href else ""
         dept_el = card.select_one(source["department_selector"]) if source.get("department_selector") else None
         dept = dept_el.get_text(" ", strip=True) if dept_el else page_dept or source.get("default_department", "")
         orcid_link = next((a for a in card.select('a[href]') if orcid_from_href(a.get("href"))), None)

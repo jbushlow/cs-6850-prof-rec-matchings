@@ -1,0 +1,11 @@
+{
+  "faculty_nodes": 2836,
+  "matched_faculty_nodes": 2236,
+  "openalex_author_profiles": 3428,
+  "papers": 74667,
+  "papers_with_abstracts": 51700,
+  "faculty_nodes_with_papers": 2236,
+  "projected_faculty_edges": 6953,
+  "skipped_large_team_papers": 0,
+  "max_clique_authors": 100
+}
