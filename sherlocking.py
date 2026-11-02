@@ -7,9 +7,9 @@ Brokerage: new team edges initiator--broker create open wedges to observed
            Per wedge the harmonic intermediary payoff is 2*g_q(scientist)/r.
 Total:      J_q(T) = F_q(T) + lambda_network * B_q,u(T).
 
-Qwen3-Embedding powers paper/requirement retrieval (not text generation).
-The separate optional *generative* Qwen requirement-decomposition placeholder
-lives in qwen_placeholder.py; it sees ONLY the input project abstract.
+Qwen3-4B generatively decomposes each input project abstract into research
+requirements. Qwen3-Embedding then does retrieval; observed coauthorships plus
+precomputed NCUT paper clusters determine network brokerage.
 """
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ from faculty_data import (apply_missing_abstract_policy, load_faculty_files,
 BASE_DIR = Path(__file__).resolve().parent
 
 # What should this script do? "recommend" is the normal pipeline.
-# Other options: "inspect-data", "decompose", "merge-qwen", "evolve".
+# Other options: "inspect-data", "decompose", "evolve".
 ACTION = "recommend"
 
 # Real faculty and publication data (the default inputs).
@@ -55,6 +55,7 @@ MISSING_ABSTRACT = "title"
 
 # Embedding model and team-selection parameters.
 QWEN_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+QWEN_GENERATIVE_MODEL = "Qwen/Qwen3-4B"  # Separate instruct/generative model
 MAX_ADDITIONAL = 3
 LAMBDA_NETWORK = 0.25
 # Component 2 uses the previously computed NCUT paper clusters directly.
@@ -83,8 +84,8 @@ SEED = 42
 # If True, recommendations use LEGACY_DATA_JSON instead of the four CSV/GZ files.
 USE_LEGACY_JSON = False
 LEGACY_DATA_JSON = BASE_DIR / "examples/professors_v1.json"
-DECOMPOSE_MODE = "heuristic"       # "heuristic" or "qwen-placeholder"
-QWEN_RESPONSE_JSON = BASE_DIR / "examples/real_qwen_response.json"
+# Recommendation ALWAYS regenerates requirements from the input abstract with
+# QWEN_GENERATIVE_MODEL. No heuristic, manual-merge, or silent fallback.
 EVOLVE_UPDATE_JSON = BASE_DIR / "examples/observed_update.json"
 UTILITY_OUTPUT_JSON = BASE_DIR / "output_utility.json"
 # ============================================================================
@@ -104,18 +105,6 @@ def save_json(path, data):
 def split_sentences(abstract):
     """Transparent sentence segmentation, not a scientific claim extractor."""
     return [s.strip() for s in re.split(r"(?<=[.!?])\s+|;\s*", abstract.strip()) if s.strip()]
-
-
-def heuristic_requirements(abstract):
-    """Conservative offline fallback: one requirement per input sentence.
-
-    Does NOT infer missing methods or capabilities. Users should inspect/edit
-    the resulting list, especially when a sentence contains multiple needs.
-    """
-    sentences = split_sentences(abstract)
-    if not sentences:
-        raise ValueError("abstract must contain text")
-    return [{"description": sentence, "weight": 1.0} for sentence in sentences]
 
 
 def validate_dataset(data):
@@ -159,7 +148,7 @@ def resolve_requirements(query, ids):
         raise ValueError("initiator_id must be one of the professor ids")
     requirements = query.get("requirements")
     if requirements is None or requirements == []:
-        requirements = heuristic_requirements(str(query.get("abstract", "")))
+        raise ValueError("No requirements: generative Qwen decomposition must run first")
     if not isinstance(requirements, list) or not requirements:
         raise ValueError("requirements must be a nonempty list")
     clean = []
@@ -221,7 +210,7 @@ class TextEncoder:
     paper titles/abstracts and evidence sentences as retrieval documents.
 
     No TF-IDF or implicit fallback; downloading Qwen model weights may be needed.
-    The generative Qwen requirement *decomposition* placeholder is unrelated.
+    Generative Qwen3 requirement decomposition runs separately before retrieval.
     """
     def __init__(self, backend="qwen3", model="Qwen/Qwen3-Embedding-0.6B", batch_size=16):
         if backend != "qwen3":
@@ -1106,7 +1095,7 @@ def recommend(data, query, *, encoder=None, max_additional=3, lambda_network=0.2
                   "Brokerage extends Kleinberg-style harmonic open-wedge payoff with requirement relevance; it is not the paper's exact network game.",
                   "All proposed u-to-candidate edges are hypothetical; the observed graph is unchanged.",
                   "The default choice is best combined score within science_tolerance of highest discovered scientific score.",
-                  "Qwen3-Embedding encodes requirements and scientific papers; no generative Qwen requirement decomposition runs during recommendation.",
+                  "Requirements were decomposed by generative Qwen3 from the proposal abstract; Qwen3-Embedding scores paper evidence.",
                   "Scores are relative to the candidate papers for this project unless fixed calibration cutoffs were supplied.",
                   "Title-only papers use the title as the evidence passage; title-based evidence is less detailed than abstract-based evidence."
               ]}
@@ -1208,7 +1197,7 @@ def main():
     """Run using the editable SETTINGS section above (no CLI arguments)."""
     if MISSING_ABSTRACT not in MISSING_ABSTRACT_CHOICES:
         raise ValueError(f"MISSING_ABSTRACT must be one of {MISSING_ABSTRACT_CHOICES}")
-    if ACTION not in ("recommend", "inspect-data", "decompose", "merge-qwen", "evolve"):
+    if ACTION not in ("recommend", "inspect-data", "decompose", "evolve"):
         raise ValueError(f"Unknown ACTION: {ACTION!r}")
 
     if ACTION == "inspect-data":
@@ -1227,32 +1216,26 @@ def main():
         print(f"Observed snapshot updated to version {updated['version']}: {UTILITY_OUTPUT_JSON}")
         return
 
-    if ACTION == "merge-qwen":
-        from qwen_placeholder import merge_qwen_response
-        merged = merge_qwen_response(load_json(QUERY_JSON), load_json(QWEN_RESPONSE_JSON))
-        save_json(UTILITY_OUTPUT_JSON, merged)
-        print(f"Merged validated Qwen requirements into: {UTILITY_OUTPUT_JSON}")
+    # Qwen receives only query["abstract"], never papers or graph data.
+    from qwen_requirements import decompose_query
+    raw_query = load_json(QUERY_JSON)
+    query = decompose_query(raw_query, model_name=QWEN_GENERATIVE_MODEL)
+    if ACTION == "decompose":
+        save_json(UTILITY_OUTPUT_JSON, query)
+        print(f"Qwen3 generated {len(query['requirements'])} requirements: {UTILITY_OUTPUT_JSON}")
         return
 
-    if ACTION == "decompose":
-        query = load_json(QUERY_JSON)
-        if DECOMPOSE_MODE == "qwen-placeholder":
-            from qwen_placeholder import write_qwen_request
-            write_qwen_request(query, UTILITY_OUTPUT_JSON)
-            print(f"Qwen request contract written to {UTILITY_OUTPUT_JSON}; NO model was invoked")
-        elif DECOMPOSE_MODE == "heuristic":
-            query["requirements"] = heuristic_requirements(str(query.get("abstract", "")))
-            save_json(UTILITY_OUTPUT_JSON, query)
-            print(f"Review/edit {UTILITY_OUTPUT_JSON} before recommending")
-        else:
-            raise ValueError("DECOMPOSE_MODE must be 'heuristic' or 'qwen-placeholder'")
-        return
+    # For ACTION="recommend", use the Qwen response DIRECTLY (no manual merge).
+    # Save the exact augmented query for traceability/review.
+    generated_query_path = OUTPUT_DIR / "qwen_decomposed_query.json"
+    save_json(generated_query_path, query)
+    print(f"Qwen3 generated {len(query['requirements'])} requirements: {generated_query_path}")
 
     data = _load_configured_data()
     if not USE_LEGACY_JSON:
         print("Loaded input files:", json.dumps(data["source_summary"], indent=2))
 
-    artifacts = recommend(data, load_json(QUERY_JSON),
+    artifacts = recommend(data, query,
                           encoder=TextEncoder(model=QWEN_MODEL),
                           max_additional=MAX_ADDITIONAL,
                           lambda_network=LAMBDA_NETWORK,
