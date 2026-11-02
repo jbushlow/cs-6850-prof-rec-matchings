@@ -10,40 +10,70 @@ import json
 import math
 from typing import Any
 
-SYSTEM_PROMPT = """You are a scientific research-project REQUIREMENTS DECOMPOSER, not a recommender.
+SYSTEM_PROMPT = """You are a scientific research-project EXPERTISE REQUIREMENTS DECOMPOSER, not a recommender.
 
-The user message consists ONLY of a research project abstract. Extract the
-independently assessable capabilities, technical tasks, or evaluation needs
-EXPLICITLY stated in that abstract. The output will later be matched against
-publication abstracts as evidence of research expertise.
+You receive ONLY a project abstract. Extract independently assessable research
+expertise that could be supported by researchers' publication abstracts. Do not
+merely summarize sentences or turn every project action into a requirement.
 
-Rules:
-1. Use ONLY facts explicitly stated in the supplied abstract. Do not invent
-   methods, datasets, models, tools, equipment, application areas, metrics,
-   collaborators, or experimental designs.
-2. A single sentence may express SEVERAL distinct requirements; several
-   sentences may describe the SAME requirement. Decompose by independently
-   assessable scientific need, NOT by sentence boundaries.
-3. Separate explicitly mentioned design/implementation, scientific methods,
-   domain knowledge, data/equipment, privacy/security, and validation or
-   reproducibility needs when they require different evidence of expertise.
-4. Use clear self-contained task/capability descriptions grounded in the
-   abstract. Preserve technical terminology. Avoid generic labels like
-   'machine learning' if the abstract explicitly calls for a narrower task.
-5. Do not turn general motivation or background into a requirement unless it
-   explicitly specifies something the project needs to accomplish.
-6. Do not split trivial synonyms or invent extra specificity. If a need is
-   genuinely too vague to decompose, keep it as one general requirement.
-7. Do NOT rank, recommend, or discuss researchers, papers, coauthors, networks,
-   or graphs. You are not given these materials.
-8. Every requirement has weight 1.0. Do not infer project priorities.
-9. Return EXACTLY one valid JSON object, with exactly one top-level key:
-   "requirements". Its value is a nonempty array. Each array entry has
-   EXACTLY two keys: "description" (nonempty string) and "weight" (number 1.0).
-   No markdown, code fences, comments, explanation, or extra fields.
+Analyze the abstract through TWO MAIN DIMENSIONS:
+
+1. DOMAIN KNOWLEDGE / EXPERTISE (what scientific or application area must be understood)
+   Identify the explicitly stated scientific disciplines, phenomena, subject
+   matter, materials, data types, specialized procedures, and application or
+   benchmark workflows that require substantive domain knowledge. A domain
+   matters even if it appears only in evaluation, a case study, or a dataset.
+   When multiple named domains/workflows call for different expertise, preserve
+   them as distinct requirements, even when listed together in one sentence.
+   Retain their technical names. Do NOT claim the project develops new techniques
+   in a domain if it only uses that domain for evaluation.
+
+2. METHODS / SYSTEMS / EVALUATION (how the research is carried out and assessed)
+   Identify the project's explicitly proposed research approach, distinguishing:
+   - METHODS: algorithms, models, inference, optimization, analysis, or other
+     technical techniques that the research uses or develops.
+   - SYSTEMS: architectures, components, integrations, implementations,
+     operating procedures, and meaningful technical constraints.
+   - EVALUATION: experimental designs, benchmarks, measured outcomes,
+     comparisons, validation, robustness, and generalization analyses.
+   These are sub-aspects of ONE dimension, not mandatory output categories.
+   Keep a method, system, or evaluation need separate only when it demands
+   distinct expertise or different publication evidence. Avoid duplicating a
+   single contribution as an overall objective plus several near-paraphrases.
+
+EXTRACTION RULES:
+1. Use ONLY information stated in the abstract. Do not invent technical details,
+   scientific capabilities, datasets, tools, equipment, metrics, or priorities.
+2. Consider BOTH dimensions before writing the final output. Neither is
+   inherently more important. There is NO fixed requirement count or quota:
+   the actual abstract decides what appears and how many items each needs.
+   If no substantive domain is stated, do not manufacture one.
+3. Decompose by INDEPENDENTLY EVIDENCEABLE EXPERTISE, not sentence boundaries.
+   Separate distinct, technically specialized domains where combining them
+   would make publication retrieval less targeted. Combine synonymous or tightly
+   coupled items when one body of research evidence would support both.
+4. Make each requirement concise, self-contained, technically specific, and
+   suitable as a semantic-search query against publication abstracts. Preserve
+   specific scientific terminology; avoid vague umbrella descriptions.
+5. Preserve the distinction between WHAT the project does and WHERE it is
+   applied or evaluated. Domain-evaluation requirements may mention evaluation
+   in the domain, without pretending to develop domain-specific methods.
+6. Do not create requirements solely from background motivation, generic claims
+   of improved performance, or repeated formulations of the same objective
+   unless they add independently assessable expertise or evaluation needs.
+7. Do not recommend scientists or discuss faculty, papers, coauthors, or
+   collaboration graphs. Only decompose the supplied abstract.
+8. Every requirement must have weight 1.0. Return exactly ONE valid JSON object
+   with ONLY the top-level key "requirements", containing a nonempty array.
+   Each entry has EXACTLY "description" (nonempty string) and "weight" (1.0).
+   No labels, category fields, reasoning, markdown, or additional text.
+
+BEFORE RETURNING, silently verify: distinct domain expertise is represented
+(including evaluation settings); methods/systems/evaluations are not overlooked;
+no near-duplicates, unsupported claims, or artificial balancing have appeared.
 
 Required JSON shape:
-{"requirements":[{"description":"Specific task from abstract","weight":1.0}]}
+{"requirements":[{"description":"Distinct research expertise grounded in abstract","weight":1.0}]}
 """
 
 
@@ -82,6 +112,32 @@ def validate_model_output(raw: str) -> list[dict[str, Any]]:
     return checked
 
 
+def validate_with_narrow_repair(raw: str) -> tuple[list[dict[str, Any]], str]:
+    """Repair only the two observed closing-delimiter mistakes, then validate.
+
+    Requirement content and schema are never repaired. Every candidate still
+    passes through validate_model_output(), so invalid fields, values, prose,
+    duplicates, and other malformed output continue to fail closed.
+    """
+    candidates = [("original", raw)]
+
+    # Qwen produced ...}]}} instead of ...}]} (one extra closing brace).
+    if raw.endswith("}]}}"):
+        candidates.append(("removed one extra closing brace", raw[:-1]))
+    # Qwen produced ...}} instead of ...}]} (missing the array bracket).
+    elif raw.startswith('{"requirements":[') and raw.endswith("}}"):
+        candidates.append(("inserted missing requirements-array bracket",
+                           raw[:-1] + "]}"))
+
+    errors = []
+    for repair_note, candidate in candidates:
+        try:
+            return validate_model_output(candidate), repair_note
+        except ValueError as exc:
+            errors.append(f"{repair_note}: {exc}")
+    raise ValueError("; ".join(errors))
+
+
 def generate_requirements(abstract: str, model_name: str = "Qwen/Qwen3-4B") -> list[dict[str, Any]]:
     """Actually invoke a generative Qwen3 model, then validate its raw JSON."""
     if not isinstance(abstract, str) or not abstract.strip():
@@ -112,7 +168,7 @@ def generate_requirements(abstract: str, model_name: str = "Qwen/Qwen3-4B") -> l
         with torch.inference_mode():
             generated = model.generate(
                 **inputs,
-                max_new_tokens=768,
+                max_new_tokens=1500,
                 do_sample=True,
                 temperature=(0.4, 0.55, 0.7)[attempt],
                 top_p=0.8,
@@ -123,9 +179,12 @@ def generate_requirements(abstract: str, model_name: str = "Qwen/Qwen3-4B") -> l
             generated[0][prompt_length:], skip_special_tokens=True
         ).strip()
         try:
-            return validate_model_output(raw)
+            requirements, repair_note = validate_with_narrow_repair(raw)
+            if repair_note != "original":
+                print(f"Warning: repaired Qwen JSON: {repair_note}")
+            return requirements
         except ValueError as exc:
-            failures.append(f"attempt {attempt + 1}: {exc}; output: {raw[:500]!r}")
+            failures.append(f"attempt {attempt + 1}: {exc}; output: {raw[:]!r}")
 
     raise RuntimeError(
         "Qwen could not produce schema-valid requirements after 3 attempts. "
