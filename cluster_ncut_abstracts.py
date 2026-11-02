@@ -16,6 +16,7 @@ Output (not written into the embedding cache's source indexes or shards):
         manifest.json                  # provenance and hyperparameters
         paper_clusters.jsonl           # paper ID / text hash / cluster ID
         centroids.npy                  # normalized mean *Qwen* vectors per cluster
+        spectral_embeddings.npy        # NCUT spectral coordinates per paper
         cluster_summary.json           # sizes + representative paper titles
 
 NCUT is computed on the Qwen document embeddings (title + abstract or title
@@ -48,15 +49,15 @@ CACHE_NAME = "paper_retrieval_v1"           # or paper_retrieval_v1_sample_<LIMI
 EMBEDDING_CACHE_DIR = BASE_DIR / "embedding_cache" / QWEN_MODEL.rsplit("/", 1)[-1] / CACHE_NAME
 OUTPUT_DIR = EMBEDDING_CACHE_DIR / "topic_clusters_ncut_v1"
 
-N_CLUSTERS = 150                 # coarse topics, number is a research hyperparameter
-N_EIG = 150                  # number of spectral eigenvectors, >= N_CLUSTERS
+N_CLUSTERS = 50                 # coarse topics, number is a research hyperparameter
+N_EIG = 50                  # number of spectral eigenvectors, >= N_CLUSTERS
 NCUT_AFFINITY_SIGMA = 0.5      # cosine affinity strength (ncut-pytorch)
 NYSTROM_SAMPLES = 59878         # representative points, 2048 limits quadratic workspace
 NYSTROM_PROPAGATION_SAMPLES = 14969
 NYSTROM_NEIGHBORS = 32
 DEVICE = "auto"                # "auto", "cuda", or "cpu"; GPU recommended for 100k
-SEED = 42
-OVERWRITE = False              # true replaces ONLY OUTPUT_DIR, not embedding cache
+SEED = 67
+OVERWRITE = True              # true replaces ONLY OUTPUT_DIR, not embedding cache
 # ==========================================================================
 
 
@@ -181,9 +182,12 @@ def run():
         if discrete.shape != (n, k):
             raise ValueError(f"Unexpected NCUT discrete shape: {discrete.shape}")
         labels = discrete.argmax(dim=1).cpu().numpy().astype(np.int32)
+        # Retain the NCUT coordinates for downstream visualization before the
+        # torch tensor is released. Rows remain aligned with documents/index.jsonl.
+        spectral_embeddings = spectral.detach().cpu().numpy().astype(np.float32, copy=True)
     del features, spectral, discrete, ncut
-    if not np.isfinite(labels).all():
-        raise ValueError("Invalid NCUT labels")
+    if not np.isfinite(labels).all() or not np.isfinite(spectral_embeddings).all():
+        raise ValueError("Invalid NCUT labels or spectral embeddings")
     # K-way may leave empty groups; compress IDs and reflect actual nonempty k.
     occupied, labels = np.unique(labels, return_inverse=True)
     actual_k = len(occupied)
@@ -227,6 +231,7 @@ def run():
                                          "text_sha256": row["text_sha256"],
                                          "cluster_id": int(c)}, ensure_ascii=False) + "\n")
         np.save(stage / "centroids.npy", centers, allow_pickle=False)
+        np.save(stage / "spectral_embeddings.npy", spectral_embeddings, allow_pickle=False)
         (stage / "cluster_summary.json").write_text(
             json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         manifest = {
@@ -238,6 +243,7 @@ def run():
             "requested_clusters": N_CLUSTERS,
             "actual_clusters": actual_k,
             "n_eig": neig,
+            "spectral_embedding_dimension": spectral_embeddings.shape[1],
             "affinity": "cosine",
             "affinity_sigma": NCUT_AFFINITY_SIGMA,
             "nystrom_samples": NYSTROM_SAMPLES,
