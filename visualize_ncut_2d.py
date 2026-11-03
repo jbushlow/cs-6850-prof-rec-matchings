@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 
 """
-python visualize_ncut_2d.py \
+CUDA_VISIBLE_DEVICES=1 python visualize_ncut_2d.py \
   --cache-dir embedding_cache/Qwen3-Embedding-0.6B/paper_retrieval_v1 \
   --space spectral
 """
