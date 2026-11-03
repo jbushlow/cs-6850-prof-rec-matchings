@@ -47,10 +47,10 @@ sys.path.insert(0, str(NCUT_REPO))
 QWEN_MODEL = "Qwen/Qwen3-Embedding-0.6B"  # MUST match embed_qwen_abstracts(2).py
 CACHE_NAME = "paper_retrieval_v1"           # or paper_retrieval_v1_sample_<LIMIT>
 EMBEDDING_CACHE_DIR = BASE_DIR / "embedding_cache" / QWEN_MODEL.rsplit("/", 1)[-1] / CACHE_NAME
-OUTPUT_DIR = EMBEDDING_CACHE_DIR / "topic_clusters_ncut_v1"
+OUTPUT_DIR = EMBEDDING_CACHE_DIR / "topic_clusters_ncut_eig70_all"
 
-N_CLUSTERS = 85                 # coarse topics, number is a research hyperparameter
-N_EIG = 85                  # number of spectral eigenvectors, >= N_CLUSTERS
+N_CLUSTERS = 70                 # coarse topics, number is a research hyperparameter
+N_EIG = 70                  # number of spectral eigenvectors, >= N_CLUSTERS
 NCUT_AFFINITY_SIGMA = 0.5      # cosine affinity strength (ncut-pytorch)
 NYSTROM_SAMPLES = 100_000
 NYSTROM_PROPAGATION_SAMPLES = 25_000
