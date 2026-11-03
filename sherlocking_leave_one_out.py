@@ -1289,7 +1289,7 @@ def export_results(folder, artifacts):
     # form. Their useful information remains in the retained files below.
     for filename in ("requirements.json", "graph.json", "professor_directory.json",
                      "professor_directory.csv", "query_evidence_graph.json",
-                     "paper_evidence.json", "rounds.csv"):
+                     "paper_evidence.json", "paper_evidence.csv", "rounds.csv"):
         path = folder / filename
         if path.exists():
             path.unlink()
@@ -1299,15 +1299,9 @@ def export_results(folder, artifacts):
                           ("trace", "trace.json")]:
         save_json(folder/filename, artifacts[key])
     directory = {row["professor_id"]: row for row in artifacts["professor_directory"]}
-    with (folder/"paper_evidence.csv").open("w", newline="", encoding="utf-8") as f:
-        cols = ["requirement_id", "paper_id", "title", "author_ids", "text_source", "score",
-                "raw_combined_cosine", "document_cosine", "sentence_cosine", "project_document_cosine",
-                "relationship_candidate", "supporting_abstract_sentence",
-                "supporting_passage", "supporting_passage_source"]
-        writer = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
-        writer.writeheader()
-        for row in artifacts["paper_evidence"]:
-            writer.writerow({**row, "author_ids": ";".join(row["author_ids"])})
+    # Full paper-by-requirement evidence remains available in memory for
+    # scoring and brokerage, but is intentionally not exported: the table has
+    # one row per paper/requirement pair and can occupy hundreds of MB per run.
     with (folder/"recommended_teams.csv").open("w", newline="", encoding="utf-8") as f:
         cols = ["rank", "professor_ids", "professor_name_department_pairs",
                 "additional_count", "objective_mode", "objective_score", "scientific_score",
