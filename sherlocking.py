@@ -73,7 +73,7 @@ EMBEDDING_CACHE_DIR = (BASE_DIR / "embedding_cache" /
                        QWEN_MODEL.rsplit("/", 1)[-1] / "paper_retrieval_v1")
 # Required: existing offline NCUT output, strictly checked against paper IDs,
 # text hashes and model. Run cluster_ncut_abstracts.py once beforehand.
-PRECOMPUTED_TOPIC_CLUSTERS_DIR = EMBEDDING_CACHE_DIR / "topic_clusters_ncut_v1"
+PRECOMPUTED_TOPIC_CLUSTERS_DIR = EMBEDDING_CACHE_DIR / "topic_clusters_ncut_eig_85_all"
 # Default scoring uses a smooth monotonic RBF transform of the ORIGINAL cosine.
 # No percentile clipping: distinct similarities such as 0.55 and 0.85 stay distinct.
 SIMILARITY_TRANSFORM = "rbf"        # "rbf", "positive_cosine", or "percentile" (legacy)
