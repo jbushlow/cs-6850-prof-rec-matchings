@@ -73,7 +73,7 @@ EMBEDDING_CACHE_DIR = (BASE_DIR / "embedding_cache" /
                        QWEN_MODEL.rsplit("/", 1)[-1] / "paper_retrieval_v1")
 # Required: existing offline NCUT output, strictly checked against paper IDs,
 # text hashes and model. Run cluster_ncut_abstracts.py once beforehand.
-PRECOMPUTED_TOPIC_CLUSTERS_DIR = EMBEDDING_CACHE_DIR / "topic_clusters_ncut_eig_85_all"
+PRECOMPUTED_TOPIC_CLUSTERS_DIR = EMBEDDING_CACHE_DIR / "topic_clusters_ncut_eig70_all"
 # Default scoring uses a smooth monotonic RBF transform of the ORIGINAL cosine.
 # No percentile clipping: distinct similarities such as 0.55 and 0.85 stay distinct.
 SIMILARITY_TRANSFORM = "rbf"        # "rbf", "positive_cosine", or "percentile" (legacy)
@@ -108,7 +108,7 @@ UTILITY_OUTPUT_JSON = BASE_DIR / "output_utility.json"
 # Run ACTION="recommend". The original CSV/GZ files and on-disk caches are NEVER edited.
 # "normal" preserves normal Sherlocking; "historical" uses a held-out publication;
 # "ongoing" runs each proposal JSON as an independent evaluation.
-EVALUATION_MODE = "ongoing"   # "normal", "historical", "ongoing"
+EVALUATION_MODE = "historical"   # "normal", "historical", "ongoing"
 HISTORICAL_PAPER_ID = "all"  # or "all" to evaluate all nine
 HISTORICAL_DIRECTIONS = "both"  # "both", "first", "second"
 REMOVE_TARGET_PAPER = True      # Set False to run a deliberate leakage-control baseline
@@ -117,10 +117,10 @@ HISTORICAL_ABSTRACT_OVERRIDES = {
     # "W2952116188": "Full abstract pasted here",
 }
 ONGOING_PROPOSAL_JSONS = [
-    BASE_DIR / "examples/proposal_real_faculty2.json",
-    BASE_DIR / "examples/proposal_real_faculty.json",
+    #BASE_DIR / "examples/proposal_real_faculty2.json",
+    #BASE_DIR / "examples/proposal_real_faculty.json",
 ]
-EVALUATION_OUTPUT_DIR = BASE_DIR / "output_leave_one_out"
+EVALUATION_OUTPUT_DIR = BASE_DIR / "output_leave_one_out70"
 
 # Paper IDs and verified pairs supplied as evaluation ground truth, NOT fed to Qwen.
 HISTORICAL_CASES = {
